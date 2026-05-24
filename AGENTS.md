@@ -31,7 +31,9 @@ cargo check --locked
 cargo fmt --check
 cargo clippy --locked -- -D warnings
 cargo test --locked --quiet
+scripts/check_install_skill.sh
 RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --dry-run
+scripts/check_npm_package.sh
 ```
 
 The `RELATED_NPM_ALLOW_MISSING_PREBUILT=1` override is only for local package

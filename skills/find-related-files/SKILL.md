@@ -62,6 +62,7 @@ env npm_config_loglevel=error npx -y --package related-cli@latest related query 
 Do not require global installation. Use `related-cli@latest` so the skill picks
 up CLI fixes and performance improvements automatically. The skill instructions
 themselves are copied into the agent, so update them by pulling this repository
-and rerunning `scripts/install_skill.sh` for a Codex project install or
-`scripts/install_skill.sh claude` for a Claude Code project install from the
-target project root. Use `--user` only when a user-level install is intentional.
+or by rerunning `npx -y --package related-cli@latest related-install-skill` for
+a Codex project install from the target project root. Use
+`related-install-skill claude` for a Claude Code project install, and use
+`--user` only when a user-level install is intentional.

@@ -22,20 +22,20 @@ co-change graph.
 
 ## Skill Installation
 
-This repository ships a portable skill at `skills/find-related-files`. The skill
+The npm package ships a portable skill at `skills/find-related-files`. The skill
 does not vendor the binary and does not require a global CLI install; it calls
 the published npm package with `npx -y --package related-cli@latest related ...`.
 
-Run the install script from this repository checkout to copy the skill folder
-into your agent's skill directory. Re-run the same script after updating this
-repository to refresh the copied skill instructions.
+Run the installer from the target project root to copy the skill folder into
+your agent's skill directory. Re-run the same command later to refresh the
+copied skill instructions.
 
 ### Codex
 
 Project install is recommended for shared repositories:
 
 ```sh
-/path/to/related-cli/scripts/install_skill.sh
+npx -y --package related-cli@latest related-install-skill
 ```
 
 Run it from the target project root. It copies the skill to
@@ -47,7 +47,7 @@ User-level install is also available as an explicit option, but is mainly useful
 for local experiments:
 
 ```sh
-/path/to/related-cli/scripts/install_skill.sh --user
+npx -y --package related-cli@latest related-install-skill --user
 ```
 
 Restart Codex after installing the skill.
@@ -57,7 +57,7 @@ Restart Codex after installing the skill.
 Project install is recommended for shared repositories:
 
 ```sh
-/path/to/related-cli/scripts/install_skill.sh claude
+npx -y --package related-cli@latest related-install-skill claude
 ```
 
 Run it from the target project root. It copies the skill to
@@ -66,7 +66,7 @@ Run it from the target project root. It copies the skill to
 User-level install, available in all projects:
 
 ```sh
-/path/to/related-cli/scripts/install_skill.sh claude --user
+npx -y --package related-cli@latest related-install-skill claude --user
 ```
 
 Claude Code can load the skill automatically from its description, or you can
@@ -146,7 +146,7 @@ Measured on `microsoft/vscode`:
 
 | tool / command | measured task | time | storage |
 |---|---|---:|---:|
-| `related query` x20 | Query related files on demand | measured in [MEASUREMENTS.md](MEASUREMENTS.md#on-demand-target-history) | none |
+| `related query` | Query related files on demand | `0.082s/query` median in the latest same-target `pack-fast` run | none |
 | `codegraph build` | Build Codegraph DB before co-change works | `158.12s` | `528 MiB` |
 | `codegraph co-change --analyze` | Populate co-change data | `2.84s` | same DB |
 | `codegraph co-change <file>` x20 | Query co-change partners | `3.76s` total, `0.188s/query` | same DB |

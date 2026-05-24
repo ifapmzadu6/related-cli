@@ -35,5 +35,9 @@ jobs:
         run: cargo clippy --locked -- -D warnings
       - name: Test
         run: cargo test --locked --quiet
+      - name: Check skill installer
+        run: scripts/check_install_skill.sh
       - name: Check npm package shape
         run: RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --dry-run
+      - name: Check packaged npm installer
+        run: scripts/check_npm_package.sh

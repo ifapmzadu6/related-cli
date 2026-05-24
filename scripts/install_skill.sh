@@ -57,7 +57,41 @@ case "$agent:$scope" in
     ;;
 esac
 
-mkdir -p "$(dirname "$dest")"
-rm -rf "$dest"
-cp -R "$skill_src" "$dest"
+if [[ ! -f "$skill_src/SKILL.md" ]]; then
+  echo "missing skill source: $skill_src" >&2
+  exit 1
+fi
+
+dest_parent="$(dirname "$dest")"
+dest_name="$(basename "$dest")"
+mkdir -p "$dest_parent"
+
+tmp="$(mktemp -d "$dest_parent/.${dest_name}.tmp.XXXXXX")"
+backup=""
+installed=0
+cleanup() {
+  rm -rf "$tmp"
+  if [[ "$installed" -eq 1 && -n "$backup" && -e "$backup" ]]; then
+    rm -rf "$backup"
+  fi
+}
+trap cleanup EXIT
+
+cp -R "$skill_src/." "$tmp/"
+if [[ -e "$dest" || -L "$dest" ]]; then
+  backup="$(mktemp -d "$dest_parent/.${dest_name}.backup.XXXXXX")"
+  rmdir "$backup"
+  mv "$dest" "$backup"
+fi
+if ! mv "$tmp" "$dest"; then
+  if [[ -n "$backup" && -e "$backup" ]]; then
+    mv "$backup" "$dest"
+  fi
+  exit 1
+fi
+installed=1
+if [[ -n "$backup" ]]; then
+  rm -rf "$backup"
+fi
+trap - EXIT
 echo "installed find-related-files skill to $dest"

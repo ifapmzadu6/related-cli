@@ -1,6 +1,6 @@
 {
   "name": "related-cli",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Content-blind related-file ranking from Git co-change history",
   "license": "MIT",
   "repository": {
@@ -11,9 +11,12 @@
     "access": "public"
   },
   "bin": {
-    "related": "npm/bin/related.js"
+    "related": "npm/bin/related.js",
+    "related-install-skill": "npm/bin/install-skill.js"
   },
   "files": [
+    "skills/find-related-files/**",
+    "npm/bin/install-skill.js",
     "npm/bin/related.js",
     "npm/prebuilt/**",
     "npm/scripts/postinstall.js",
