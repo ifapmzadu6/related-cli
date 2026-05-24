@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="640" viewBox="0 0 1600 640" role="img" aria-labelledby="title desc">
   <title id="title">Token count reduction with related-cli</title>
-  <desc id="desc">A chart comparing 231 command-output tokens with related-cli against 16,381 command-output tokens without related-cli.</desc>
+  <desc id="desc">A before and after chart showing command-output tokens drop from 16,381 without related-cli to 231 with related-cli.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0d1117"/>
@@ -18,6 +18,9 @@
     <filter id="softShadow" x="-20%" y="-40%" width="140%" height="180%">
       <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
     </filter>
+    <marker id="arrowHead" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L10 6L2 10Z" fill="#2dd4bf"/>
+    </marker>
     <style>
       .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
       .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -30,26 +33,31 @@
 
   <rect width="1600" height="640" fill="url(#bg)"/>
   <path d="M90 298H1510" class="grid"/>
-  <path d="M90 458H1510" class="grid"/>
+  <path d="M90 492H1510" class="grid"/>
 
   <text x="90" y="105" class="sans strong" font-size="52" font-weight="760">Token savings before reading source</text>
-  <text x="90" y="155" class="sans muted" font-size="28">VS Code Codex smoke test: same first companion file, far less command output.</text>
+  <text x="90" y="155" class="sans muted" font-size="28">VS Code Codex smoke test: same first companion file after adding related-cli.</text>
 
   <g transform="translate(90 225)">
-    <text x="0" y="0" class="sans muted" font-size="26">With related-cli</text>
-    <text x="0" y="48" class="mono strong" font-size="48" font-weight="760">231 tokens</text>
-    <rect x="500" y="10" width="24" height="58" rx="12" fill="url(#teal)" filter="url(#softShadow)"/>
-    <text x="550" y="48" class="sans" fill="#99f6e4" font-size="26">compact top-10 related-file shortlist</text>
-  </g>
-
-  <g transform="translate(90 385)">
-    <text x="0" y="0" class="sans muted" font-size="26">Without related-cli</text>
+    <text x="0" y="0" class="sans muted" font-size="26">Before: without related-cli</text>
     <text x="0" y="48" class="mono strong" font-size="48" font-weight="760">16,381 tokens</text>
     <rect x="500" y="10" width="900" height="58" rx="12" fill="url(#costStripes)" stroke="#ef4444" stroke-width="2" opacity="0.92" filter="url(#softShadow)"/>
     <text x="1425" y="48" class="sans" fill="#fecaca" font-size="26" text-anchor="end">forced source-body read</text>
   </g>
 
-  <g transform="translate(90 560)">
+  <g transform="translate(90 322)">
+    <path d="M500 0V48" stroke="#2dd4bf" stroke-width="5" stroke-linecap="round" marker-end="url(#arrowHead)"/>
+    <text x="535" y="32" class="sans" fill="#99f6e4" font-size="24">add related-cli shortlist</text>
+  </g>
+
+  <g transform="translate(90 405)">
+    <text x="0" y="0" class="sans muted" font-size="26">After: with related-cli</text>
+    <text x="0" y="48" class="mono strong" font-size="48" font-weight="760">231 tokens</text>
+    <rect x="500" y="10" width="24" height="58" rx="12" fill="url(#teal)" filter="url(#softShadow)"/>
+    <text x="550" y="48" class="sans" fill="#99f6e4" font-size="26">compact top-10 related-file shortlist</text>
+  </g>
+
+  <g transform="translate(90 570)">
     <rect x="0" y="-42" width="430" height="72" rx="10" fill="#0f766e" opacity="0.24" stroke="#2dd4bf" stroke-width="2"/>
     <text x="24" y="4" class="sans" fill="#ccfbf1" font-size="30" font-weight="720">70.9x less command output</text>
     <text x="540" y="4" class="sans muted" font-size="26">231 vs 16,381 tokens in the measured Codex run</text>
