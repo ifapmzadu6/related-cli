@@ -1,0 +1,19 @@
+[package]
+name = "related"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ifapmzadu6/related-cli"
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+gix = { version = "0.83", default-features = false, features = ["blob-diff", "max-performance-safe", "parallel", "revision", "sha1"] }
+memmap2 = "0.9"
+rayon = "1"
+rustc-hash = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,237 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - id: version
+        name: Verify tag matches Cargo and npm versions
+        shell: bash
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          scripts/verify_release_version.sh "$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            binary: related
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            binary: related
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            binary: related
+            musl: true
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            binary: related
+            musl: true
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+            binary: related.exe
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            binary: related.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Install Rust
+        shell: bash
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+          rustup target add "${{ matrix.target }}"
+      - name: Install musl tools
+        if: matrix.musl == true
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build release binary
+        shell: bash
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Stage npm and release artifacts
+        shell: bash
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          BINARY="${{ matrix.binary }}"
+          SOURCE="target/$TARGET/release/$BINARY"
+          test -f "$SOURCE"
+
+          mkdir -p "dist/npm-prebuilt/$TARGET" dist/release
+          cp "$SOURCE" "dist/npm-prebuilt/$TARGET/$BINARY"
+          if [[ "$BINARY" != *.exe ]]; then
+            chmod 755 "dist/npm-prebuilt/$TARGET/$BINARY"
+          fi
+
+          tar -C "dist/npm-prebuilt/$TARGET" -czf "dist/release/related-$VERSION-$TARGET.tar.gz" "$BINARY"
+      - name: Upload npm prebuilt binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-prebuilt-${{ matrix.target }}
+          path: dist/npm-prebuilt/${{ matrix.target }}/${{ matrix.binary }}
+          if-no-files-found: error
+      - name: Upload GitHub release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/release/related-${{ needs.validate.outputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  github-release:
+    name: Publish GitHub release assets
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist/release
+          shasum -a 256 related-*.tar.gz > checksums.txt
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/release/* --clobber
+          else
+            gh release create "$TAG" dist/release/* \
+              --verify-tag \
+              --title "$TAG" \
+              --notes "Prebuilt related binaries and npm package inputs for $TAG."
+          fi
+
+  npm-package:
+    name: Verify npm package with all binaries
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Download npm prebuilt binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-prebuilt-*
+          path: dist/npm-prebuilt-artifacts
+      - name: Stage npm prebuilt binaries
+        shell: bash
+        run: scripts/stage_npm_prebuilt.sh dist/npm-prebuilt-artifacts
+      - name: Verify npm package contents
+        shell: bash
+        run: |
+          node npm/scripts/verify-prebuilt.js
+          npm pack --dry-run
+          npm pack
+      - name: Upload npm package tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: related-cli-${{ needs.validate.outputs.version }}.tgz
+          if-no-files-found: error
+
+  npm-publish:
+    name: Publish npm package
+    needs: [validate, build, npm-package]
+    if: vars.NPM_RELEASE_MODE == 'publish' || vars.NPM_RELEASE_MODE == 'stage'
+    runs-on: ubuntu-24.04
+    environment: npm-release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+      - name: Download npm prebuilt binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-prebuilt-*
+          path: dist/npm-prebuilt-artifacts
+      - name: Stage npm prebuilt binaries
+        shell: bash
+        run: scripts/stage_npm_prebuilt.sh dist/npm-prebuilt-artifacts
+      - name: Verify npm package contents
+        shell: bash
+        run: |
+          node npm/scripts/verify-prebuilt.js
+          npm pack --dry-run
+      - name: Publish to npm with trusted publishing
+        shell: bash
+        run: |
+          MODE="$NPM_RELEASE_MODE"
+          if [[ "$MODE" == "stage" ]]; then
+            npm stage publish
+          elif [[ "$MODE" == "publish" ]]; then
+            npm publish --access public
+          else
+            echo "Unsupported NPM_RELEASE_MODE: $MODE" >&2
+            exit 1
+          fi
+        env:
+          NPM_RELEASE_MODE: ${{ vars.NPM_RELEASE_MODE }}

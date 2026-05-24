@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        shell: bash
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install stable --profile minimal
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Check
+        run: cargo check --locked
+      - name: Test
+        run: cargo test --locked --quiet
+      - name: Check npm package shape
+        run: RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --dry-run

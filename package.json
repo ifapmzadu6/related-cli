@@ -1,0 +1,42 @@
+{
+  "name": "related-cli",
+  "version": "0.1.0",
+  "description": "Content-blind related-file ranking from Git co-change history",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ifapmzadu6/related-cli.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "related": "npm/bin/related.js"
+  },
+  "files": [
+    "npm/bin/related.js",
+    "npm/prebuilt/**",
+    "npm/scripts/postinstall.js",
+    "npm/scripts/verify-prebuilt.js",
+    "README.md",
+    "COMPARISON.md",
+    "MEASUREMENTS.md",
+    "BENCHMARK.md"
+  ],
+  "scripts": {
+    "postinstall": "node npm/scripts/postinstall.js",
+    "prepack": "node npm/scripts/verify-prebuilt.js",
+    "stage:local": "scripts/stage_npm_prebuilt.sh --local",
+    "verify:prebuilt": "node npm/scripts/verify-prebuilt.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "keywords": [
+    "git",
+    "cli",
+    "llm",
+    "cochange",
+    "related-files"
+  ]
+}

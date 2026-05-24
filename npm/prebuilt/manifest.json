@@ -1,0 +1,28 @@
+{
+  "targets": {
+    "darwin-arm64": {
+      "triple": "aarch64-apple-darwin",
+      "binary": "related"
+    },
+    "darwin-x64": {
+      "triple": "x86_64-apple-darwin",
+      "binary": "related"
+    },
+    "linux-arm64": {
+      "triple": "aarch64-unknown-linux-musl",
+      "binary": "related"
+    },
+    "linux-x64": {
+      "triple": "x86_64-unknown-linux-musl",
+      "binary": "related"
+    },
+    "win32-arm64": {
+      "triple": "aarch64-pc-windows-msvc",
+      "binary": "related.exe"
+    },
+    "win32-x64": {
+      "triple": "x86_64-pc-windows-msvc",
+      "binary": "related.exe"
+    }
+  }
+}
