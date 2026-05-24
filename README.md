@@ -1,4 +1,16 @@
+<div align="center">
+
 # related
+
+**Content-blind related-file ranking from Git co-change history**
+
+[![npm version](https://img.shields.io/npm/v/related-cli?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/related-cli)
+[![CI](https://github.com/ifapmzadu6/related-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ifapmzadu6/related-cli/actions/workflows/ci.yml)
+[![Node.js](https://img.shields.io/node/v/related-cli?logo=node.js&logoColor=white&color=339933)](package.json)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-000000?logo=rust&logoColor=white)](Cargo.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+
+</div>
 
 `related` is a small CLI that ranks files related to a target file using only Git
 co-change history.
