@@ -21,6 +21,8 @@ command-output tokens when forced to read source bodies without `related`.
 Direct artifact measurements showed the same shortlist replacing `8.6k` to
 `46.1k` tokens of speculative pre-read file context.
 
+![A compact related-file shortlist blocks a large stack of speculative source reads](docs/assets/token-savings-hero.png)
+
 It intentionally does not parse source code, imports, symbols, embeddings, or file
 contents. That makes the signal language-agnostic and useful for code, docs,
 configs, migrations, prompts, runbooks, and any other files tracked in Git.
