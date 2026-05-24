@@ -80,6 +80,11 @@ By default commands run against the current directory's Git repository. Use
 No persistent index is created; the graph is built on demand from the target
 file's Git history.
 
+The default backend, `pack-fast`, is optimized for low-latency agent calls in
+large repositories and may stop before an exact full history walk. Use
+`--history-backend git` when exact Git history is more important than speed, or
+`--history-backend pack-scan` for a deeper pack-only scan.
+
 For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
 default. Add `--evidence N` when example commits would help, or use
 `explain file-a file-b` for one focused relationship.

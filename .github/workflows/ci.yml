@@ -31,6 +31,8 @@ jobs:
         run: cargo fmt --check
       - name: Check
         run: cargo check --locked
+      - name: Lint
+        run: cargo clippy --locked -- -D warnings
       - name: Test
         run: cargo test --locked --quiet
       - name: Check npm package shape

@@ -142,6 +142,19 @@ struct QueryOutput {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct ExplainOutput {
+    a: String,
+    b: String,
+    related: bool,
+    cochanges: usize,
+    weight: f64,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_seen: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<Evidence>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct EvalReport {
     repo_root: String,
     train_commits: usize,
@@ -262,7 +275,7 @@ fn print_usage() {
 Usage:
   related query <file> [--mode direct|pagerank|path|hot] [--top N] [--json]
   related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
-  related explain <file-a> <file-b> [--max-commits N]
+  related explain <file-a> <file-b> [--max-commits N] [--json]
   related diff [--staged] [--mode direct|pagerank|path|hot] [--top N] [--max-commits N]
   related eval [--repo PATH] [--test-commits N] [--train-commits N]
 
@@ -326,10 +339,10 @@ fn query_on_demand(
     top: usize,
     config: &OnDemandConfig,
 ) -> AnyResult<Vec<ResultItem>> {
-    if mode == "direct" {
-        if let Some(results) = query_direct_on_demand_fast(root, target, config, top)? {
-            return Ok(results);
-        }
+    if mode == "direct"
+        && let Some(results) = query_direct_on_demand_fast(root, target, config, top)?
+    {
+        return Ok(results);
     }
     let commits = on_demand_commits(root, target, config)?;
     if mode == "direct" {
@@ -496,32 +509,43 @@ fn cmd_explain(args: &[String]) -> AnyResult<()> {
             "jobs",
             "scan-commits",
         ],
-        &[],
+        &["json"],
     )?;
     if parsed.positionals.len() != 2 {
         return Err("explain requires exactly two files".into());
     }
 
     let repo = flag_string(&parsed, "repo", ".");
+    let json_out = flag_bool(&parsed, "json");
     let config = parse_on_demand_config(&parsed, DEFAULT_EVIDENCE)?;
     let root = git_root(&repo)?;
-    let target = normalize_input_path(&root, &parsed.positionals[0]);
-    let data = build_on_demand_graph_data(&root, &target, &config)?;
-    let graph = RelatedGraph::new(&data);
-    let a = graph.resolve_path(&root, &target)?;
-    let b = graph.resolve_path(&root, &parsed.positionals[1])?;
-    let key = pair_key(&a, &b);
-    let Some(pair) = graph.pairs.get(&key) else {
-        println!("{a} and {b} have no direct co-change evidence in this history window.");
-        return Ok(());
-    };
+    let output = explain_relationship(
+        &root,
+        &parsed.positionals[0],
+        &parsed.positionals[1],
+        &config,
+    )?;
 
-    println!("{a} <-> {b}");
+    if json_out {
+        serde_json::to_writer_pretty(io::stdout(), &output)?;
+        println!();
+        return Ok(());
+    }
+
+    if !output.related {
+        println!(
+            "{} and {} have no direct co-change evidence in this history window.",
+            output.a, output.b
+        );
+        return Ok(());
+    }
+
+    println!("{} <-> {}", output.a, output.b);
     println!(
         "cochanged={} weight={:.6} last_seen={}",
-        pair.cochanges, pair.weight, pair.last_seen
+        output.cochanges, output.weight, output.last_seen
     );
-    for ev in &pair.evidence {
+    for ev in &output.evidence {
         println!(
             "- {} {} files={} weight={:.6} {}",
             short_hash(&ev.hash),
@@ -532,6 +556,41 @@ fn cmd_explain(args: &[String]) -> AnyResult<()> {
         );
     }
     Ok(())
+}
+
+fn explain_relationship(
+    root: &str,
+    a_input: &str,
+    b_input: &str,
+    config: &OnDemandConfig,
+) -> AnyResult<ExplainOutput> {
+    let target = normalize_input_path(root, a_input);
+    let data = build_on_demand_graph_data(root, &target, config)?;
+    let graph = RelatedGraph::new(&data);
+    let a = graph.resolve_path(root, &target)?;
+    let b = graph.resolve_path_or_tracked(root, b_input)?;
+    let key = pair_key(&a, &b);
+    let Some(pair) = graph.pairs.get(&key) else {
+        return Ok(ExplainOutput {
+            a,
+            b,
+            related: false,
+            cochanges: 0,
+            weight: 0.0,
+            last_seen: String::new(),
+            evidence: Vec::new(),
+        });
+    };
+
+    Ok(ExplainOutput {
+        a,
+        b,
+        related: true,
+        cochanges: pair.cochanges,
+        weight: pair.weight,
+        last_seen: pair.last_seen.clone(),
+        evidence: pair.evidence.clone(),
+    })
 }
 
 fn cmd_diff(args: &[String]) -> AnyResult<()> {
@@ -1188,7 +1247,7 @@ fn gix_log_for_target(
     let mut local = thread_safe.to_thread_local();
     local.object_cache_size_if_unset(16 * 1024 * 1024);
     let since_seconds = parse_gix_since(since)?;
-    let mut walk = local
+    let walk = local
         .head_id()?
         .ancestors()
         .sorting(gix::revision::walk::Sorting::ByCommitTime(
@@ -1202,13 +1261,13 @@ fn gix_log_for_target(
     let mut batch = Vec::with_capacity(batch_size);
     let mut scanned = 0usize;
 
-    while let Some(info) = walk.next() {
+    for info in walk {
         let info = info?;
         scanned += 1;
-        if let Some(since_seconds) = since_seconds {
-            if info.commit_time() < since_seconds {
-                break;
-            }
+        if let Some(since_seconds) = since_seconds
+            && info.commit_time() < since_seconds
+        {
+            break;
         }
         batch.push(GixCommitSeed {
             id: info.id,
@@ -1342,6 +1401,7 @@ fn pack_log_for_target(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_log_for_target_inner(
     repo: &str,
     target: &str,
@@ -1388,6 +1448,7 @@ fn pack_log_for_target_inner(
     Ok(commits)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_direct_for_target_inner(
     repo: &str,
     target: &str,
@@ -1643,6 +1704,7 @@ fn pack_direct_for_selected_parallel(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_direct_add_commit_no_evidence(
     store: &mut RawGitStore,
     target: &str,
@@ -1930,10 +1992,10 @@ impl PackTargetPath {
                 return Ok((false, new_entry.is_some()));
             }
             old_tree = old_entry
-                .filter(|entry| raw_tree_entry_is_tree(entry))
+                .filter(raw_tree_entry_is_tree)
                 .map(|entry| entry.id);
             new_tree = new_entry
-                .filter(|entry| raw_tree_entry_is_tree(entry))
+                .filter(raw_tree_entry_is_tree)
                 .map(|entry| entry.id);
             if old_tree.is_none() && new_tree.is_none() {
                 return Ok((true, false));
@@ -1959,23 +2021,20 @@ fn pack_path_history_decision(
     let mut decision = PackPathDecision::new(false);
     let mut saw_parent = false;
     for parent in commit.parents.iter() {
-        match store.raw_commit(parent) {
-            Ok(parent_commit) => {
-                saw_parent = true;
-                let (treesame, new_exists) =
-                    target.treesame_and_new_exists(store, parent_commit.tree, commit.tree)?;
-                let walk_parent = PackWalkParent {
-                    id: parent,
-                    time: parent_commit.time,
-                };
-                if treesame {
-                    return Ok(PackPathDecision::one_parent(false, walk_parent));
-                } else {
-                    decision.include |= new_exists;
-                    decision.push_parent(walk_parent);
-                }
+        if let Ok(parent_commit) = store.raw_commit(parent) {
+            saw_parent = true;
+            let (treesame, new_exists) =
+                target.treesame_and_new_exists(store, parent_commit.tree, commit.tree)?;
+            let walk_parent = PackWalkParent {
+                id: parent,
+                time: parent_commit.time,
+            };
+            if treesame {
+                return Ok(PackPathDecision::one_parent(false, walk_parent));
+            } else {
+                decision.include |= new_exists;
+                decision.push_parent(walk_parent);
             }
-            Err(_) => {}
         }
     }
 
@@ -2123,7 +2182,7 @@ fn pack_diff_trees(
         prefix.extend_from_slice(name);
         if raw_tree_entry_is_tree(entry) {
             let old_child = old_entry
-                .filter(|entry| raw_tree_entry_is_tree(entry))
+                .filter(raw_tree_entry_is_tree)
                 .map(|entry| entry.id);
             pack_diff_trees(store, old_child, Some(entry.id), prefix, out, file_limit)?;
         } else {
@@ -2763,13 +2822,12 @@ fn parse_raw_commit(data: &[u8]) -> AnyResult<RawCommit> {
                 offset = parsed_offset;
                 break;
             }
-        } else if time.is_none() {
-            if let Some(author) = line.strip_prefix(b"author ") {
-                if let Some((seconds, parsed_offset)) = parse_raw_commit_time(author) {
-                    time = Some(seconds);
-                    offset = parsed_offset;
-                }
-            }
+        } else if time.is_none()
+            && let Some(author) = line.strip_prefix(b"author ")
+            && let Some((seconds, parsed_offset)) = parse_raw_commit_time(author)
+        {
+            time = Some(seconds);
+            offset = parsed_offset;
         }
     }
     let time = time.ok_or("commit missing timestamp")?;
@@ -3881,6 +3939,23 @@ impl<'a> RelatedGraph<'a> {
 
     fn resolve_path(&self, repo_root: &str, input: &str) -> AnyResult<String> {
         let path = normalize_input_path(repo_root, input);
+        self.resolve_known_or_ambiguous_path(input, path, true)
+    }
+
+    fn resolve_path_or_tracked(&self, repo_root: &str, input: &str) -> AnyResult<String> {
+        let path = normalize_input_path(repo_root, input);
+        self.resolve_known_or_tracked_path(repo_root, input, path)
+    }
+
+    fn resolve_known_or_ambiguous_path(
+        &self,
+        input: &str,
+        path: String,
+        require_graph_presence: bool,
+    ) -> AnyResult<String> {
+        if path.is_empty() {
+            return Err(format!("{input:?} is not a valid path").into());
+        }
         if self.data.files.contains_key(&path) {
             return Ok(path);
         }
@@ -3895,7 +3970,50 @@ impl<'a> RelatedGraph<'a> {
             .collect();
         match matches.len() {
             1 => Ok(matches[0].clone()),
-            0 => Err(format!("{input:?} is not present in the co-change graph").into()),
+            0 if require_graph_presence => {
+                Err(format!("{input:?} is not present in the co-change graph").into())
+            }
+            0 => Ok(path),
+            _ => Err(format!(
+                "{input:?} is ambiguous: {}",
+                matches
+                    .iter()
+                    .map(|item| item.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into()),
+        }
+    }
+
+    fn resolve_known_or_tracked_path(
+        &self,
+        repo_root: &str,
+        input: &str,
+        path: String,
+    ) -> AnyResult<String> {
+        if path.is_empty() {
+            return Err(format!("{input:?} is not a valid path").into());
+        }
+        if self.data.files.contains_key(&path) {
+            return Ok(path);
+        }
+        let matches: Vec<&String> = self
+            .paths
+            .iter()
+            .filter(|candidate| {
+                candidate.as_str() == path
+                    || candidate.ends_with(&format!("/{path}"))
+                    || path_basename(candidate) == path
+            })
+            .collect();
+        match matches.len() {
+            1 => Ok(matches[0].clone()),
+            0 if git_path_is_tracked(repo_root, &path)? => Ok(path),
+            0 => Err(format!(
+                "{input:?} is not tracked in the repository and is not present in the co-change graph"
+            )
+            .into()),
             _ => Err(format!(
                 "{input:?} is ambiguous: {}",
                 matches
@@ -4193,6 +4311,21 @@ fn run_git_with_stdin(repo: impl AsRef<Path>, args: &[&str], input: &[u8]) -> An
     }
 }
 
+fn git_path_is_tracked(repo: &str, path: &str) -> AnyResult<bool> {
+    if path.is_empty() {
+        return Ok(false);
+    }
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(literal_pathspec(path))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    Ok(output.success())
+}
+
 fn git_diff_names(repo: &str, staged: bool) -> AnyResult<Vec<String>> {
     let args = if staged {
         vec!["diff", "--name-only", "--cached"]
@@ -4235,10 +4368,10 @@ fn normalize_git_path(path: &str) -> String {
 fn normalize_input_path(repo_root: &str, input: &str) -> String {
     let input = input.trim();
     let path = Path::new(input);
-    if path.is_absolute() {
-        if let Ok(rel) = path.strip_prefix(repo_root) {
-            return normalize_git_path(&rel.display().to_string());
-        }
+    if path.is_absolute()
+        && let Ok(rel) = path.strip_prefix(repo_root)
+    {
+        return normalize_git_path(&rel.display().to_string());
     }
     normalize_git_path(input)
 }
@@ -4633,6 +4766,65 @@ mod tests {
             "20".to_string(),
             "--mode".to_string(),
             "direct".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn cli_explain_supports_json_and_unrelated_files() {
+        let repo = new_test_repo();
+        write_commit(&repo, "pair", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
+        write_commit(&repo, "other pair", &[("c.md", "c1\n"), ("d.md", "d1\n")]);
+        let config = OnDemandConfig {
+            backend: OnDemandBackend::GitCli,
+            max_commits: 20,
+            since: None,
+            max_files_per_commit: 10,
+            half_life_days: 365.0,
+            evidence_limit: 3,
+            jobs: 1,
+            jobs_explicit: false,
+            scan_commits: 0,
+        };
+
+        let related =
+            explain_relationship(repo.to_str().unwrap(), "a.md", "b.md", &config).unwrap();
+        assert!(related.related);
+        assert_eq!(related.a, "a.md");
+        assert_eq!(related.b, "b.md");
+        assert_eq!(related.cochanges, 1);
+        assert_eq!(related.evidence[0].subject, "pair");
+
+        let unrelated =
+            explain_relationship(repo.to_str().unwrap(), "a.md", "c.md", &config).unwrap();
+        assert!(!unrelated.related);
+        assert_eq!(unrelated.a, "a.md");
+        assert_eq!(unrelated.b, "c.md");
+        assert_eq!(unrelated.cochanges, 0);
+
+        let missing = explain_relationship(repo.to_str().unwrap(), "a.md", "missing.md", &config)
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("not tracked in the repository"));
+
+        run(vec![
+            "explain".to_string(),
+            "a.md".to_string(),
+            "b.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        run(vec![
+            "explain".to_string(),
+            "a.md".to_string(),
+            "c.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
             "--json".to_string(),
         ])
         .unwrap();

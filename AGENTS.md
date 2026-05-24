@@ -29,6 +29,7 @@ Run these before pushing the release commit and tag:
 ```sh
 cargo check --locked
 cargo fmt --check
+cargo clippy --locked -- -D warnings
 cargo test --locked --quiet
 RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --dry-run
 ```
@@ -117,9 +118,16 @@ tag passed in `tag`.
   publisher relationship that allows direct publish.
 - unset or any other value: skip npm publish.
 
-The current safe default is `stage`. With staged publishing, a successful
-GitHub Actions run can still leave `npm view related-cli version` on the old
-version. That means the package is staged and awaiting npm approval.
+The current repository setting is `publish`. npm Trusted Publishing is
+configured for the `release.yml` workflow and `npm-release` environment, so the
+release job can publish directly without an npm token or a per-release npm
+browser approval. Keep the GitHub `npm-release` environment approval as the
+human gate.
+
+Use `stage` only when the project intentionally wants an extra npm-side manual
+approval. With staged publishing, a successful GitHub Actions run can still
+leave `npm view related-cli version` on the old version. That means the package
+is staged and awaiting npm approval.
 
 Inspect staged packages with:
 
@@ -148,11 +156,9 @@ npx -y npm@latest trust github related-cli \
   --repo ifapmzadu6/related-cli \
   --file release.yml \
   --env npm-release \
+  --allow-publish \
   --allow-stage-publish
 ```
-
-Use `--allow-publish` only if the project intentionally switches from staged
-approval to direct automated publishing.
 
 ### GitHub release verification
 

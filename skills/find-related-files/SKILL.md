@@ -41,7 +41,8 @@ context hint, not proof that a file must change.
 - Use `explain file-a file-b --json` to inspect one relationship.
 - Use `--history-backend git` when exact Git history is more important than
   low latency.
-- Use the default backend for a fast pre-edit check in large workspaces.
+- Use the default `pack-fast` backend for a fast approximate pre-edit check in
+  large workspaces.
 
 ## Distribution Notes
 
