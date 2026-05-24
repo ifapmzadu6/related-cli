@@ -85,6 +85,13 @@ large repositories and may stop before an exact full history walk. Use
 `--history-backend git` when exact Git history is more important than speed, or
 `--history-backend pack-scan` for a deeper pack-only scan.
 
+If the top results all look like broad release, formatting, or initial-commit
+churn, retry with a smaller commit-size filter before trusting the ranking:
+
+```sh
+npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-files-per-commit 20
+```
+
 For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
 default. Add `--evidence N` when example commits would help, or use
 `explain file-a file-b` for one focused relationship.

@@ -35,6 +35,13 @@ npx -y --package related-cli@latest related diff --staged --top 20 --json
 Open the strongest relevant results before making edits. Treat the ranking as a
 context hint, not proof that a file must change.
 
+If the top results look like broad release, formatting, generated, or initial
+commit churn, retry with a tighter commit-size filter before opening files:
+
+```sh
+npx -y --package related-cli@latest related query path/to/file --top 20 --max-files-per-commit 20 --json
+```
+
 ## Options
 
 - Add `--evidence N` when examples of shared commits would help.

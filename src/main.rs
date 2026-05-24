@@ -198,6 +198,13 @@ struct RelatedGraph<'a> {
     paths: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GraphPathMatch<'a> {
+    Known(String),
+    Missing(String),
+    Ambiguous(Vec<&'a str>),
+}
+
 #[derive(Default)]
 struct ParsedArgs {
     flags: HashMap<String, Option<String>>,
@@ -246,30 +253,36 @@ fn main() {
 }
 
 fn run(args: Vec<String>) -> AnyResult<()> {
+    let mut stdout = io::stdout();
+    run_with_writer(args, &mut stdout)
+}
+
+fn run_with_writer<W: Write>(args: Vec<String>, out: &mut W) -> AnyResult<()> {
     let Some(command) = args.first().map(String::as_str) else {
-        print_usage();
+        print_usage(out)?;
         return Ok(());
     };
 
     match command {
-        "query" => cmd_query(&args[1..]),
-        "explain" => cmd_explain(&args[1..]),
-        "diff" => cmd_diff(&args[1..]),
-        "eval" => cmd_eval(&args[1..]),
+        "query" => cmd_query(&args[1..], out),
+        "explain" => cmd_explain(&args[1..], out),
+        "diff" => cmd_diff(&args[1..], out),
+        "eval" => cmd_eval(&args[1..], out),
         "version" | "-V" | "--version" => {
-            println!("related {}", env!("CARGO_PKG_VERSION"));
+            writeln!(out, "related {}", env!("CARGO_PKG_VERSION"))?;
             Ok(())
         }
         "help" | "-h" | "--help" => {
-            print_usage();
+            print_usage(out)?;
             Ok(())
         }
         other => Err(format!("unknown command {other:?}").into()),
     }
 }
 
-fn print_usage() {
-    println!(
+fn print_usage<W: Write>(out: &mut W) -> AnyResult<()> {
+    writeln!(
+        out,
         r#"related: content-blind related-file ranking from Git co-change history
 
 Usage:
@@ -281,10 +294,17 @@ Usage:
 
 The graph is built on demand from files that changed together in Git commits.
 No source parsing, imports, embeddings, or file contents are used."#
-    );
+    )?;
+    Ok(())
 }
 
-fn cmd_query(args: &[String]) -> AnyResult<()> {
+fn write_json<T: Serialize + ?Sized, W: Write>(out: &mut W, value: &T) -> AnyResult<()> {
+    serde_json::to_writer_pretty(&mut *out, value)?;
+    writeln!(out)?;
+    Ok(())
+}
+
+fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let parsed = parse_args(
         args,
         &[
@@ -305,10 +325,10 @@ fn cmd_query(args: &[String]) -> AnyResult<()> {
     if parsed.positionals.len() != 1 {
         return Err("query requires exactly one file".into());
     }
-    cmd_query_on_demand(&parsed)
+    cmd_query_on_demand(&parsed, out)
 }
 
-fn cmd_query_on_demand(parsed: &ParsedArgs) -> AnyResult<()> {
+fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<()> {
     let repo = flag_string(parsed, "repo", ".");
     let mode = flag_string(parsed, "mode", "direct");
     let top = flag_usize(parsed, "top", DEFAULT_TOP)?;
@@ -324,10 +344,9 @@ fn cmd_query_on_demand(parsed: &ParsedArgs) -> AnyResult<()> {
         related,
     };
     if json_out {
-        serde_json::to_writer_pretty(io::stdout(), &output)?;
-        println!();
+        write_json(out, &output)?;
     } else {
-        print_query(&output);
+        print_query(out, &output)?;
     }
     Ok(())
 }
@@ -495,7 +514,7 @@ fn on_demand_commits(root: &str, target: &str, config: &OnDemandConfig) -> AnyRe
     }
 }
 
-fn cmd_explain(args: &[String]) -> AnyResult<()> {
+fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let parsed = parse_args(
         args,
         &[
@@ -527,33 +546,35 @@ fn cmd_explain(args: &[String]) -> AnyResult<()> {
     )?;
 
     if json_out {
-        serde_json::to_writer_pretty(io::stdout(), &output)?;
-        println!();
+        write_json(out, &output)?;
         return Ok(());
     }
 
     if !output.related {
-        println!(
+        writeln!(
+            out,
             "{} and {} have no direct co-change evidence in this history window.",
             output.a, output.b
-        );
+        )?;
         return Ok(());
     }
 
-    println!("{} <-> {}", output.a, output.b);
-    println!(
+    writeln!(out, "{} <-> {}", output.a, output.b)?;
+    writeln!(
+        out,
         "cochanged={} weight={:.6} last_seen={}",
         output.cochanges, output.weight, output.last_seen
-    );
+    )?;
     for ev in &output.evidence {
-        println!(
+        writeln!(
+            out,
             "- {} {} files={} weight={:.6} {}",
             short_hash(&ev.hash),
             ev.date,
             ev.file_count,
             ev.weight,
             ev.subject
-        );
+        )?;
     }
     Ok(())
 }
@@ -593,7 +614,7 @@ fn explain_relationship(
     })
 }
 
-fn cmd_diff(args: &[String]) -> AnyResult<()> {
+fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let parsed = parse_args(
         args,
         &[
@@ -650,15 +671,14 @@ fn cmd_diff(args: &[String]) -> AnyResult<()> {
         related,
     };
     if json_out {
-        serde_json::to_writer_pretty(io::stdout(), &output)?;
-        println!();
+        write_json(out, &output)?;
     } else {
-        print_query(&output);
+        print_query(out, &output)?;
     }
     Ok(())
 }
 
-fn cmd_eval(args: &[String]) -> AnyResult<()> {
+fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let parsed = parse_args(
         args,
         &[
@@ -718,10 +738,9 @@ fn cmd_eval(args: &[String]) -> AnyResult<()> {
     report.max_files_per_commit = max_files;
 
     if json_out {
-        serde_json::to_writer_pretty(io::stdout(), &report)?;
-        println!();
+        write_json(out, &report)?;
     } else {
-        print_eval(&report);
+        print_eval(out, &report)?;
     }
     Ok(())
 }
@@ -3956,33 +3975,13 @@ impl<'a> RelatedGraph<'a> {
         if path.is_empty() {
             return Err(format!("{input:?} is not a valid path").into());
         }
-        if self.data.files.contains_key(&path) {
-            return Ok(path);
-        }
-        let matches: Vec<&String> = self
-            .paths
-            .iter()
-            .filter(|candidate| {
-                candidate.as_str() == path
-                    || candidate.ends_with(&format!("/{path}"))
-                    || path_basename(candidate) == path
-            })
-            .collect();
-        match matches.len() {
-            1 => Ok(matches[0].clone()),
-            0 if require_graph_presence => {
+        match self.match_graph_path(path) {
+            GraphPathMatch::Known(path) => Ok(path),
+            GraphPathMatch::Missing(_) if require_graph_presence => {
                 Err(format!("{input:?} is not present in the co-change graph").into())
             }
-            0 => Ok(path),
-            _ => Err(format!(
-                "{input:?} is ambiguous: {}",
-                matches
-                    .iter()
-                    .map(|item| item.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-            .into()),
+            GraphPathMatch::Missing(path) => Ok(path),
+            GraphPathMatch::Ambiguous(matches) => Err(ambiguous_path_error(input, &matches).into()),
         }
     }
 
@@ -3995,36 +3994,55 @@ impl<'a> RelatedGraph<'a> {
         if path.is_empty() {
             return Err(format!("{input:?} is not a valid path").into());
         }
-        if self.data.files.contains_key(&path) {
-            return Ok(path);
-        }
-        let matches: Vec<&String> = self
-            .paths
-            .iter()
-            .filter(|candidate| {
-                candidate.as_str() == path
-                    || candidate.ends_with(&format!("/{path}"))
-                    || path_basename(candidate) == path
-            })
-            .collect();
-        match matches.len() {
-            1 => Ok(matches[0].clone()),
-            0 if git_path_is_tracked(repo_root, &path)? => Ok(path),
-            0 => Err(format!(
+        match self.match_graph_path(path) {
+            GraphPathMatch::Known(path) => Ok(path),
+            GraphPathMatch::Missing(path) if git_path_is_tracked(repo_root, &path)? => Ok(path),
+            GraphPathMatch::Missing(_) => Err(format!(
                 "{input:?} is not tracked in the repository and is not present in the co-change graph"
             )
             .into()),
-            _ => Err(format!(
-                "{input:?} is ambiguous: {}",
-                matches
-                    .iter()
-                    .map(|item| item.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-            .into()),
+            GraphPathMatch::Ambiguous(matches) => Err(ambiguous_path_error(input, &matches).into()),
         }
     }
+
+    fn match_graph_path<'b>(&'b self, path: String) -> GraphPathMatch<'b> {
+        if self.data.files.contains_key(&path) {
+            return GraphPathMatch::Known(path);
+        }
+
+        let suffix = format!("/{path}");
+        let mut first_match = None;
+        let mut ambiguous = Vec::new();
+        for candidate in &self.paths {
+            if candidate.as_str() != path
+                && !candidate.ends_with(&suffix)
+                && path_basename(candidate) != path
+            {
+                continue;
+            }
+            let candidate = candidate.as_str();
+            if let Some(first) = first_match {
+                if ambiguous.is_empty() {
+                    ambiguous.push(first);
+                }
+                ambiguous.push(candidate);
+            } else {
+                first_match = Some(candidate);
+            }
+        }
+
+        if !ambiguous.is_empty() {
+            GraphPathMatch::Ambiguous(ambiguous)
+        } else if let Some(path) = first_match {
+            GraphPathMatch::Known(path.to_string())
+        } else {
+            GraphPathMatch::Missing(path)
+        }
+    }
+}
+
+fn ambiguous_path_error(input: &str, matches: &[&str]) -> String {
+    format!("{input:?} is ambiguous: {}", matches.join(", "))
 }
 
 fn evaluate(
@@ -4523,44 +4541,50 @@ fn pack_direct_scored_pair_cmp(
         .then(left.path.cmp(&right.path))
 }
 
-fn print_query(output: &QueryOutput) {
-    println!("related to {} (mode={})", output.target, output.mode);
+fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
+    writeln!(out, "related to {} (mode={})", output.target, output.mode)?;
     if output.related.is_empty() {
-        println!("no related files found");
-        return;
+        writeln!(out, "no related files found")?;
+        return Ok(());
     }
     for (idx, item) in output.related.iter().enumerate() {
-        print!("{:>2}. {:.6}  {}", idx + 1, item.score, item.path);
+        write!(out, "{:>2}. {:.6}  {}", idx + 1, item.score, item.path)?;
         if item.cochanges > 0 {
-            print!(
+            write!(
+                out,
                 "  cochanged={} last_seen={}",
                 item.cochanges, item.last_seen
-            );
+            )?;
         }
-        println!("  {}", item.reason);
+        writeln!(out, "  {}", item.reason)?;
     }
+    Ok(())
 }
 
-fn print_eval(report: &EvalReport) {
-    println!("repo: {}", report.repo_root);
-    println!(
+fn print_eval<W: Write>(out: &mut W, report: &EvalReport) -> io::Result<()> {
+    writeln!(out, "repo: {}", report.repo_root)?;
+    writeln!(
+        out,
         "train_commits={} test_commits={} top_k={} max_files_per_commit={}",
         report.train_commits, report.test_commits, report.top_k, report.max_files_per_commit
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "candidate_tasks={} evaluated_tasks={} skipped_unknown_seed={} skipped_no_known_target={}",
         report.candidate_tasks,
         report.evaluated_tasks,
         report.skipped_unknown_seed,
         report.skipped_no_known_target
-    );
-    println!();
-    println!(
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
         "{:<10} {:>8} {:>10} {:>12} {:>10} {:>10} {:>11}",
         "mode", "tasks", "hit@k", "precision@k", "recall@k", "mrr", "avg_results"
-    );
+    )?;
     for metric in &report.metrics {
-        println!(
+        writeln!(
+            out,
             "{:<10} {:>8} {:>10.4} {:>12.4} {:>10.4} {:>10.4} {:>11.2}",
             metric.mode,
             metric.tasks,
@@ -4569,8 +4593,9 @@ fn print_eval(report: &EvalReport) {
             metric.recall_at_k,
             metric.mrr,
             metric.avg_results
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn short_hash(hash: &str) -> &str {
@@ -4584,6 +4609,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn parse_json_output(output: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(output).unwrap()
+    }
 
     #[test]
     fn git_tree_name_comparator_matches_directory_sort_rule() {
@@ -4756,19 +4785,29 @@ mod tests {
         let repo = new_test_repo();
         write_commit(&repo, "pair", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
         write_commit(&repo, "pair again", &[("a.md", "a2\n"), ("b.md", "b2\n")]);
-        run(vec![
-            "query".to_string(),
-            "a.md".to_string(),
-            "--repo".to_string(),
-            repo.display().to_string(),
-            "--on-demand".to_string(),
-            "--max-commits".to_string(),
-            "20".to_string(),
-            "--mode".to_string(),
-            "direct".to_string(),
-            "--json".to_string(),
-        ])
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+                "--max-commits".to_string(),
+                "20".to_string(),
+                "--mode".to_string(),
+                "direct".to_string(),
+                "--json".to_string(),
+            ],
+            &mut output,
+        )
         .unwrap();
+        let json = parse_json_output(&output);
+        assert_eq!(json["target"].as_str(), Some("a.md"));
+        assert_eq!(json["mode"].as_str(), Some("direct:on-demand:GitCli"));
+        assert_eq!(json["related"][0]["path"].as_str(), Some("b.md"));
+        assert_eq!(json["related"][0]["cochanges"].as_u64(), Some(2));
 
         fs::remove_dir_all(repo).ok();
     }
@@ -4810,24 +4849,47 @@ mod tests {
             .to_string();
         assert!(missing.contains("not tracked in the repository"));
 
-        run(vec![
-            "explain".to_string(),
-            "a.md".to_string(),
-            "b.md".to_string(),
-            "--repo".to_string(),
-            repo.display().to_string(),
-            "--json".to_string(),
-        ])
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "explain".to_string(),
+                "a.md".to_string(),
+                "b.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+                "--json".to_string(),
+            ],
+            &mut output,
+        )
         .unwrap();
-        run(vec![
-            "explain".to_string(),
-            "a.md".to_string(),
-            "c.md".to_string(),
-            "--repo".to_string(),
-            repo.display().to_string(),
-            "--json".to_string(),
-        ])
+        let json = parse_json_output(&output);
+        assert_eq!(json["a"].as_str(), Some("a.md"));
+        assert_eq!(json["b"].as_str(), Some("b.md"));
+        assert_eq!(json["related"].as_bool(), Some(true));
+        assert_eq!(json["cochanges"].as_u64(), Some(1));
+
+        output.clear();
+        run_with_writer(
+            vec![
+                "explain".to_string(),
+                "a.md".to_string(),
+                "c.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+                "--json".to_string(),
+            ],
+            &mut output,
+        )
         .unwrap();
+        let json = parse_json_output(&output);
+        assert_eq!(json["a"].as_str(), Some("a.md"));
+        assert_eq!(json["b"].as_str(), Some("c.md"));
+        assert_eq!(json["related"].as_bool(), Some(false));
+        assert_eq!(json["cochanges"].as_u64(), Some(0));
 
         fs::remove_dir_all(repo).ok();
     }
