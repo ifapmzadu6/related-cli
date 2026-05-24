@@ -20,22 +20,24 @@ operational relationship. `related` turns that history into a weighted graph:
 Queries can use either direct co-change ranking or Personalized PageRank over the
 co-change graph.
 
-## Install
+## Quick Start
 
 ```sh
-npm install -g related-cli
-related query src/auth.ts --repo /path/to/repo --top 20
+npx -y --package related-cli@latest related query src/auth.ts --top 20
 ```
 
 The npm package is designed to bundle the prebuilt `related` binaries for the
 supported macOS, Linux, and Windows CPU/OS combinations, so installing it does
 not require Rust, Cargo, or a build toolchain. It does not download a binary at
 install time; the small platform binaries are shipped inside the npm tarball.
+For LLM skills and tools, global installation is optional: invoke it through
+`npx`/`npm exec` from the target repository.
 
 ## Build
 
 ```sh
 cargo build --release
+cargo run --release -- query src/auth.ts --top 20
 ```
 
 The release profile uses thin LTO and a single codegen unit because the CLI is
@@ -44,19 +46,21 @@ intended to be called frequently as a low-latency tool.
 ## Usage
 
 ```sh
-target/release/related query src/auth.ts --repo /path/to/repo --top 20
-target/release/related query src/auth.ts --repo /path/to/repo --mode direct --json
-target/release/related query src/auth.ts --repo /path/to/repo --history-backend git
-target/release/related query src/auth.ts --repo /path/to/repo --history-backend hybrid
-target/release/related query src/auth.ts --repo /path/to/repo --history-backend git-remove-empty
-target/release/related explain src/auth.ts tests/auth.test.ts --repo /path/to/repo
-target/release/related diff --repo /path/to/repo --staged
+npx -y --package related-cli@latest related query src/auth.ts --top 20
+npx -y --package related-cli@latest related query src/auth.ts --mode direct --json
+npx -y --package related-cli@latest related query src/auth.ts --history-backend git
+npx -y --package related-cli@latest related query src/auth.ts --history-backend hybrid
+npx -y --package related-cli@latest related query src/auth.ts --history-backend git-remove-empty
+npx -y --package related-cli@latest related explain src/auth.ts tests/auth.test.ts
+npx -y --package related-cli@latest related diff --staged
 ```
 
 `related` no longer writes or reads a persistent index. `query`, `explain`, and
 `diff` build the needed co-change graph on demand for the target file or changed
 files. The default window is the target file's latest `1000` touching commits,
 not the repository's latest `1000` commits.
+By default commands run against the current directory's Git repository. Use
+`--repo PATH` only when querying another checkout from outside that repository.
 
 The default `pack-fast` backend reads `.git/objects/pack` and `.idx` files
 directly, without invoking Git or a Git library for the hot path. It memory maps
@@ -113,7 +117,7 @@ It reports `hit@k`, `precision@k`, `recall@k`, and `MRR` for:
 - `hot`: a global frequently-changed-file baseline
 
 ```sh
-target/release/related eval --repo /path/to/large/repo --test-commits 200 --train-commits 1000 --top 10
+npx -y --package related-cli@latest related eval --test-commits 200 --train-commits 1000 --top 10
 ```
 
 The `path` baseline is not grep. It is included because `eval` is intentionally

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Find Related Files"
+  short_description: "Find Git co-change companion files."
+  default_prompt: "Before editing a repository file, find historically related files."
