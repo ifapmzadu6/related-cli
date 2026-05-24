@@ -24,6 +24,7 @@ const PACK_FAST_MIN_SCAN_COMMITS: usize = 1_000;
 const PACK_FAST_MIN_TARGET_COMMITS: usize = 256;
 const PACK_FAST_STALL_COMMITS: usize = 5_000;
 const PACK_DIRECT_PARALLEL_MIN_COMMITS: usize = 256;
+const BROAD_CHANGE_EXCLUDE_SUGGESTION: &str = "*.lock,*-lock.*,*lockb,.github/workflows/*";
 
 type AnyError = Box<dyn Error>;
 type AnyResult<T> = Result<T, AnyError>;
@@ -874,8 +875,9 @@ fn query_hints(results: &[ResultItem], exclude_patterns: &[String]) -> Vec<Strin
     if broad_change_results >= 4 && broad_change_results * 2 >= window {
         if exclude_patterns.is_empty() {
             hints.push(
-                "Top results include several lockfile, manifest, workflow, or release-doc paths. Retry with --max-files-per-commit 10 --exclude '*.lock,.github/workflows/*' --evidence 3 before opening many files."
-                    .to_string(),
+                format!(
+                    "Top results include several lockfile, manifest, workflow, or release-doc paths. Retry with --max-files-per-commit 10 --exclude '{BROAD_CHANGE_EXCLUDE_SUGGESTION}' --evidence 3 before opening many files."
+                ),
             );
         } else {
             hints.push(
@@ -4965,6 +4967,9 @@ mod tests {
                 ("a.md", "a1\n"),
                 ("b.md", "b1\n"),
                 ("Cargo.lock", "lock1\n"),
+                ("package-lock.json", "package lock 1\n"),
+                ("pnpm-lock.yaml", "pnpm lock 1\n"),
+                ("bun.lockb", "bun lock 1\n"),
             ],
         );
         write_commit(
@@ -4974,6 +4979,9 @@ mod tests {
                 ("a.md", "a2\n"),
                 ("b.md", "b2\n"),
                 ("Cargo.lock", "lock2\n"),
+                ("package-lock.json", "package lock 2\n"),
+                ("pnpm-lock.yaml", "pnpm lock 2\n"),
+                ("bun.lockb", "bun lock 2\n"),
             ],
         );
 
@@ -4989,7 +4997,7 @@ mod tests {
                 "--max-commits".to_string(),
                 "20".to_string(),
                 "--exclude".to_string(),
-                "*.lock".to_string(),
+                BROAD_CHANGE_EXCLUDE_SUGGESTION.to_string(),
                 "--json".to_string(),
             ],
             &mut output,
@@ -4999,6 +5007,13 @@ mod tests {
         let related = json["related"].as_array().unwrap();
         assert!(related.iter().any(|item| item["path"] == "b.md"));
         assert!(!related.iter().any(|item| item["path"] == "Cargo.lock"));
+        assert!(
+            !related
+                .iter()
+                .any(|item| item["path"] == "package-lock.json")
+        );
+        assert!(!related.iter().any(|item| item["path"] == "pnpm-lock.yaml"));
+        assert!(!related.iter().any(|item| item["path"] == "bun.lockb"));
 
         fs::remove_dir_all(repo).ok();
     }

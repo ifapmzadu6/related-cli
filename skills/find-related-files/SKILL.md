@@ -43,14 +43,14 @@ filter plus result exclusions before opening files:
 
 ```sh
 env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --evidence 3 --json
-env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --max-files-per-commit 10 --exclude '*.lock,.github/workflows/*' --json
+env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --max-files-per-commit 10 --exclude '*.lock,*-lock.*,*lockb,.github/workflows/*' --json
 ```
 
 ## Options
 
 - Add `--evidence N` when examples of shared commits would help.
 - Add `--exclude PATTERNS` to hide comma-separated path patterns such as
-  `*.lock,.github/workflows/*` from results.
+  `*.lock,*-lock.*,*lockb,.github/workflows/*` from results.
 - Use `explain file-a file-b --json` to inspect one relationship.
 - Use `--history-backend git` when exact Git history is more important than
   low latency.

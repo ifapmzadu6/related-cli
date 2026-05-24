@@ -98,7 +98,7 @@ filter plus result exclusions before trusting the ranking:
 
 ```sh
 npx -y --package related-cli@latest related query src/auth.ts --top 20 --evidence 3
-npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-files-per-commit 10 --exclude '*.lock,.github/workflows/*'
+npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-files-per-commit 10 --exclude '*.lock,*-lock.*,*lockb,.github/workflows/*'
 ```
 
 For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
