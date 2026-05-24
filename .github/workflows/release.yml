@@ -229,9 +229,9 @@ jobs:
         run: |
           MODE="$NPM_RELEASE_MODE"
           if [[ "$MODE" == "stage" ]]; then
-            npm stage publish
+            npx -y npm@latest stage publish
           elif [[ "$MODE" == "publish" ]]; then
-            npm publish --access public
+            npx -y npm@latest publish --access public
           else
             echo "Unsupported NPM_RELEASE_MODE: $MODE" >&2
             exit 1
