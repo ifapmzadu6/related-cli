@@ -32,28 +32,41 @@ repository to refresh the copied skill instructions.
 
 ### Codex
 
-User-level install, available to Codex across projects. This copies the skill to
-`${CODEX_HOME:-~/.codex}/skills/find-related-files`; it does not install the CLI
-globally.
+Project install is recommended for shared repositories:
 
 ```sh
-scripts/install_skill.sh codex
+/path/to/related-cli/scripts/install_skill.sh
+```
+
+Run it from the target project root. It copies the skill to
+`.codex/skills/find-related-files` in the current project. Commit that directory
+when you want the same pre-edit related-file workflow to travel with the
+repository.
+
+User-level install is also available as an explicit option, but is mainly useful
+for local experiments:
+
+```sh
+/path/to/related-cli/scripts/install_skill.sh --user
 ```
 
 Restart Codex after installing the skill.
 
 ### Claude Code
 
-Personal install, available in all projects:
+Project install is recommended for shared repositories:
 
 ```sh
-scripts/install_skill.sh claude
+/path/to/related-cli/scripts/install_skill.sh claude
 ```
 
-Project install, checked into a single repository:
+Run it from the target project root. It copies the skill to
+`.claude/skills/find-related-files` in the current project.
+
+User-level install, available in all projects:
 
 ```sh
-/path/to/related-cli/scripts/install_skill.sh claude-project "$PWD"
+/path/to/related-cli/scripts/install_skill.sh claude --user
 ```
 
 Claude Code can load the skill automatically from its description, or you can
@@ -92,42 +105,33 @@ For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
 default. Add `--evidence N` when example commits would help, or use
 `explain file-a file-b` for one focused relationship.
 
-## Local Development
-
-```sh
-cargo build --release
-cargo run --release -- query src/auth.ts --top 20
-```
-
-The release profile uses thin LTO and a single codegen unit because the CLI is
-intended to be called frequently as a low-latency tool.
-
-## Evaluation
-
-`related eval` holds out the newest commits, trains on older commits, and asks:
-given one file from a held-out commit, can the tool rank the other files from
-that same commit in the top K?
-
-It reports `hit@k`, `precision@k`, `recall@k`, and `MRR` for:
-
-- `direct`: direct co-change score
-- `pagerank`: Personalized PageRank on the co-change graph
-- `path`: a content-blind path/name similarity baseline
-- `hot`: a global frequently-changed-file baseline
-
-```sh
-npx -y --package related-cli@latest related eval --test-commits 200 --train-commits 1000 --top 10
-```
-
-The `path` baseline is not grep. It is included because `eval` is intentionally
-content-blind; it answers whether history beats simple file-name/path proximity.
-
 ## Comparison
 
-`related` overlaps with tools such as LaserOwl, Glaux, Sourcebook, Qartez,
-repowise, Codegraph, and CodeScene. The narrow positioning is different:
-`related` is a local Rust CLI for one job: quickly return historically
-co-changed files for a target file without parsing source code.
+`related` sits near tools such as LaserOwl, Glaux, Sourcebook, Qartez, repowise,
+Codegraph, and CodeScene. Those systems validate the same underlying idea:
+repository history is a useful signal for agent context, missed-file detection,
+and change-risk analysis.
+
+The difference is shape. Most nearby tools are broader code-intelligence
+systems: they parse code, build indexes or databases, expose hosted or MCP
+surfaces, combine semantic/static/history signals, or evaluate a whole edit
+plan. That breadth is valuable, but it is also heavier than what an LLM often
+needs immediately before touching one file.
+
+`related` is intentionally small:
+
+- one local Rust binary
+- no persistent index
+- no source parsing, embeddings, imports, ASTs, or file contents
+- works for docs, prompts, configs, migrations, and code
+- returns compact JSON suitable for an LLM tool call
+- can show evidence commits when the agent needs to verify the relationship
+
+The bet is that Git history is already a behavior graph of the project. If two
+files repeatedly changed together, the repository is telling the agent, "look
+here too." `related` makes that signal cheap enough to call before ordinary
+edits, especially in large workspaces where grep finds text matches but not
+operational coupling.
 
 The closest public CLIs that were installed and measured locally were
 `@optave/codegraph` and `sourcebook`.
@@ -149,17 +153,18 @@ Measured on `microsoft/vscode`:
 | `sourcebook scan-history` | Scan history for co-change pairs | `3.15s` | output only |
 | `sourcebook preflight --file` x20 | Suggest companion files before editing | `174.68s` total, `8.734s/query` | no persistent index used here |
 
-Both `related` and Codegraph ranked the same top companion file for this target:
+For the same VS Code target, both `related` and Codegraph ranked the same top
+companion file:
 
 ```text
 src/vs/platform/sandbox/test/common/terminalSandboxEngine.test.ts
 ```
 
-This is not a claim that `related` replaces those tools. Codegraph builds a
-broader source graph, and Sourcebook blends history with structural preflight
-signals. The narrower claim is: for the LLM-tool task "given this file, quickly
-return historically co-changed files," `related` is substantially lighter and
-faster on this VS Code measurement.
+This is the practical advantage: `related` gets the high-value co-change answer
+without asking the agent to wait for a source graph, database, hosted service,
+or broad preflight scan. It does not replace those systems; it gives agents a
+small first move that is fast, local, language-agnostic, and easy to compose
+with grep, type checks, tests, or larger code-intelligence tools.
 
 See [COMPARISON.md](COMPARISON.md) for a broader public-docs-based comparison
 against nearby tools.
@@ -167,7 +172,8 @@ against nearby tools.
 See [MEASUREMENTS.md](MEASUREMENTS.md) for empirical measurements across
 accuracy, top-K behavior, history window size, large-commit filtering, query
 latency, multiple repositories, and speed against on-demand Git history
-implementations.
+implementations. It also documents the built-in holdout evaluation used to
+compare co-change ranking against path and hot-file baselines.
 
 To reproduce the comparison against public third-party CLIs on VS Code:
 
