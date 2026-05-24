@@ -21,6 +21,7 @@
     "npm/prebuilt/**",
     "npm/scripts/postinstall.js",
     "npm/scripts/verify-prebuilt.js",
+    "docs/assets/**",
     "README.md",
     "COMPARISON.md",
     "MEASUREMENTS.md",

@@ -1,6 +1,6 @@
 <div align="center">
 
-# related
+# related-cli
 
 **Content-blind related-file ranking from Git co-change history**
 
@@ -21,7 +21,7 @@ command-output tokens when forced to read source bodies without `related`.
 Direct artifact measurements showed the same shortlist replacing `8.6k` to
 `46.1k` tokens of speculative pre-read file context.
 
-![A compact related-file shortlist blocks a large stack of speculative source reads](docs/assets/token-savings-hero.png)
+![Token count comparison: 231 tokens with related-cli versus 16,381 tokens without related-cli](docs/assets/token-savings-chart.svg)
 
 It intentionally does not parse source code, imports, symbols, embeddings, or file
 contents. That makes the signal language-agnostic and useful for code, docs,
