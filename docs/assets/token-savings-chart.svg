@@ -58,6 +58,5 @@
   <g transform="translate(90 635)">
     <rect x="0" y="-42" width="430" height="72" rx="10" fill="#0f766e" opacity="0.24" stroke="#2dd4bf" stroke-width="2"/>
     <text x="24" y="4" class="sans" fill="#ccfbf1" font-size="30" font-weight="720">70.9x less command output</text>
-    <text x="540" y="4" class="sans muted" font-size="26">231 vs 16,381 tokens in the measured Codex run</text>
   </g>
 </svg>
