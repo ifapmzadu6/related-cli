@@ -218,23 +218,41 @@ is intentionally disabled until `NPM_RELEASE_MODE` is set to `publish` or
 `stage`; when enabled, it is intended to use npm Trusted Publishing/OIDC, not a
 long-lived `NPM_TOKEN`.
 
-Before the first npm release:
+For the initial package claim:
 
 1. Publish this repository publicly on GitHub.
 2. Create the `related-cli` package on npm. npm requires a package to already
    exist before trusted publishing can be configured, so the first publish must
    be a one-time manual 2FA publish or a placeholder release.
-3. Configure npm Trusted Publisher:
+3. Configure npm Trusted Publisher.
+4. In GitHub, create the `npm-release` environment and add a required reviewer.
+5. Set the GitHub repository variable `NPM_RELEASE_MODE`.
+
+The recommended setup is staged publishing. GitHub Actions can stage the package
+only after the GitHub environment reviewer approves the job, and npm still
+requires maintainer approval before the staged package becomes public:
+
+```sh
+npm trust github related-cli \
+  --repo ifapmzadu6/related-cli \
+  --file release.yml \
+  --env npm-release \
+  --allow-stage-publish
+
+gh variable set NPM_RELEASE_MODE --body stage --repo ifapmzadu6/related-cli
+```
+
+Equivalent npm website settings:
+
    - provider: GitHub Actions
    - organization/user: `ifapmzadu6`
    - repository: `related-cli`
    - workflow filename: `release.yml`
    - environment name: `npm-release`
-   - allowed action: `npm publish`
-4. In GitHub, create the `npm-release` environment and add a required reviewer.
-5. Set the GitHub repository variable `NPM_RELEASE_MODE=publish`.
+   - allowed action: `npm stage publish`
 
-The trusted publisher can also be configured with npm CLI 11.10+:
+Direct publish is also supported by the workflow, but it should only be enabled
+when that is the intended release policy:
 
 ```sh
 npm trust github related-cli \
@@ -242,12 +260,9 @@ npm trust github related-cli \
   --file release.yml \
   --env npm-release \
   --allow-publish
-```
 
-After the first npm release, npm staged publishing can be enabled for an extra
-approval step. Configure the trusted publisher to allow `npm stage publish`, set
-the GitHub repository variable `NPM_RELEASE_MODE=stage`, and approve staged
-packages with npm 2FA before they become public.
+gh variable set NPM_RELEASE_MODE --body publish --repo ifapmzadu6/related-cli
+```
 
 ## License
 
