@@ -23,19 +23,18 @@ co-change graph.
 ## Skill Installation
 
 This repository ships a portable skill at `skills/find-related-files`. The skill
-does not vendor the binary and does not require a global install; it calls the
-published npm package with `npx -y --package related-cli@latest related ...`.
+does not vendor the binary and does not require a global CLI install; it calls
+the published npm package with `npx -y --package related-cli@latest related ...`.
 
-Clone the repository once, then copy the skill folder into your agent's skill
-directory. Re-run the install script after pulling this repository to update the
-copied skill instructions:
-
-```sh
-git clone --depth 1 https://github.com/ifapmzadu6/related-cli.git
-cd related-cli
-```
+Run the install script from this repository checkout to copy the skill folder
+into your agent's skill directory. Re-run the same script after updating this
+repository to refresh the copied skill instructions.
 
 ### Codex
+
+User-level install, available to Codex across projects. This copies the skill to
+`${CODEX_HOME:-~/.codex}/skills/find-related-files`; it does not install the CLI
+globally.
 
 ```sh
 scripts/install_skill.sh codex
