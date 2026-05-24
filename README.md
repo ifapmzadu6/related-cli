@@ -113,9 +113,10 @@ npx -y --package related-cli@latest related query src/auth.ts --top 20 --evidenc
 npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-files-per-commit 10 --exclude '*.lock,*-lock.*,*lockb,.github/workflows/*'
 ```
 
-For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
-default. Add `--evidence N` when example commits would help, or use
-`explain file-a file-b` for one focused relationship.
+The default text output is compact for LLM-tool use: it prints ranked paths plus
+short `co=` counts, and `query`/`diff` omit per-commit evidence by default. Add
+`--json` for structured automation, `--evidence N` when example commits would
+help, or use `explain file-a file-b` for one focused relationship.
 
 ## Comparison
 
@@ -145,6 +146,84 @@ here too." `related` makes that signal cheap enough to call before ordinary
 edits, especially in large workspaces where grep finds text matches but not
 operational coupling.
 
+### Focused comparison: Codegraph
+
+This section refers specifically to
+[`@optave/codegraph`](https://github.com/optave/ops-codegraph-tool), the local
+Tree-sitter/SQLite/MCP code graph CLI published on npm. Codegraph is a much
+broader code-intelligence system than `related`: its public README describes
+function-level parsing, imports, callers, dataflow, CFG, semantic search, role
+classification, CI gates, MCP tools, incremental rebuilds, and Git co-change.
+
+That breadth is useful when an agent needs structural code understanding. It is
+also more tool than the narrow pre-edit question often needs:
+
+```text
+I am about to touch this file. Based only on repository history, what else
+usually changes with it?
+```
+
+For that question, `related` has a deliberately smaller surface:
+
+| Dimension | `related` | `@optave/codegraph` |
+|---|---|---|
+| Primary job | Rank historically related files | Build and query a source graph |
+| Setup before first query | None beyond Git history and one CLI call | `codegraph build` creates `.codegraph/graph.db`; co-change requires a scan |
+| Persistent storage | None | SQLite database under `.codegraph/` |
+| Source parsing | No | Yes, Tree-sitter |
+| Content sent to the agent | File paths, scores, counts, optional evidence commits | Depends on command; can include structural summaries, symbols, imports, callers, graph metadata |
+| Works on non-code files | Yes: docs, prompts, configs, migrations, lockfiles, runbooks | Mostly code-oriented, though Git co-change is file-level |
+| Failure mode | No history means weak/no ranking | Parser/language/schema/build freshness can matter |
+| Best fit | Cheap "look here too" context expansion before an edit | Rich code navigation, impact analysis, MCP workflows, and CI gates |
+
+Where `related` wins against Codegraph:
+
+- **Zero index tax.** There is no source graph to build, refresh, cache, or
+  invalidate before an agent can ask for companion files.
+- **No parser boundary.** The same signal works for TypeScript, Markdown, JSON,
+  YAML, prompts, generated manifests, migrations, and repo-specific operational
+  files.
+- **Small blast radius.** It is one Rust binary and one question. It does not
+  introduce an MCP server, SQLite state, semantic embeddings, language support
+  decisions, or CI policy surface just to get related files.
+- **History is the product.** The ranking is based on how maintainers actually
+  changed the repository, not how imports or symbols say the code could relate.
+- **Composable output.** The result is easy to feed into Codex, Claude Code,
+  grep, `sed`, tests, or a larger code-intelligence tool. It is not trying to be
+  the whole agent workflow.
+- **Better first move for broad repos.** In a large repository, the expensive
+  mistake is often opening too many plausible files. `related` gives the agent a
+  compact shortlist before it spends tokens reading source.
+
+Where Codegraph wins:
+
+- It can answer symbol-level questions that `related` intentionally cannot:
+  "who calls this function?", "what imports this file?", "what is the transitive
+  impact?", "is this export dead?", "what is the CFG/dataflow shape?"
+- Its MCP surface is richer for agents that want a persistent code map rather
+  than a one-shot companion-file hint.
+- Its `brief`, `context`, `fn-impact`, `diff-impact`, `where`, `deps`, and
+  semantic search commands can replace many manual `grep`/`cat` steps when the
+  graph is already built and fresh.
+
+So the comparison is not "Codegraph is bad." It is:
+
+```text
+Use Codegraph when you want a full local code graph.
+Use related when you want the cheapest historical companion-file signal.
+```
+
+If the job is specifically "before editing this file, what else should an agent
+inspect?", `related` is the sharper default:
+
+- no `codegraph build`
+- no `.codegraph` database
+- no parser or language-support dependency
+- smaller default text output in the measured VS Code code-file sweep
+- faster query latency even after Codegraph is already built
+- coverage for non-code files such as `package.json`, lockfiles, docs, prompts,
+  configs, and migrations
+
 The closest public CLIs that were installed and measured locally were
 `@optave/codegraph` and `sourcebook`.
 
@@ -158,10 +237,10 @@ Measured on `microsoft/vscode`:
 
 | tool / command | measured task | time | storage |
 |---|---|---:|---:|
-| `related query` | Query related files on demand | `0.082s/query` median in the latest same-target `pack-fast` run | none |
-| `codegraph build` | Build Codegraph DB before co-change works | `158.12s` | `528 MiB` |
+| `related query` x20 | Query related files on demand | `1.14s` total, `0.057s/query` | none |
+| `codegraph build` | Build Codegraph DB before co-change works | `158.12s` | `527 MiB` |
 | `codegraph co-change --analyze` | Populate co-change data | `2.84s` | same DB |
-| `codegraph co-change <file>` x20 | Query co-change partners | `3.76s` total, `0.188s/query` | same DB |
+| `codegraph co-change <file>` x20 | Query co-change partners | `6.21s` total, `0.311s/query` | same DB |
 | `sourcebook scan-history` | Scan history for co-change pairs | `3.15s` | output only |
 | `sourcebook preflight --file` x20 | Suggest companion files before editing | `174.68s` total, `8.734s/query` | no persistent index used here |
 
@@ -177,6 +256,62 @@ without asking the agent to wait for a source graph, database, hosted service,
 or broad preflight scan. It does not replace those systems; it gives agents a
 small first move that is fast, local, language-agnostic, and easy to compose
 with grep, type checks, tests, or larger code-intelligence tools.
+
+### Token efficiency on VS Code
+
+Codegraph markets token efficiency because a code graph can answer questions
+without making an agent read whole files. `related` gets token efficiency from a
+different design: it does not summarize source code at all. It sends a compact
+historical shortlist so the agent can decide what to open next.
+
+Measured on the same VS Code checkout and target above, using `tiktoken`
+`cl100k_base` as a reproducible tokenizer:
+
+| artifact sent to the agent | bytes | approx tokens | note |
+|---|---:|---:|---|
+| `related query` text output, top 10 | `893` | `231` | no index; compact paths and co-change counts |
+| `related query --json`, top 10 | `2,924` | `980` | structured JSON for tools |
+| `jq -r '.related[].path'` from `related --json` | `732` | `170` | paths only when an agent wants the smallest shortlist |
+| `codegraph co-change` text output, top 10 | `1,162` | `331` | requires existing `.codegraph` DB and co-change analysis |
+| `codegraph co-change --json`, top 10 | `2,433` | `797` | structured co-change output |
+| `codegraph brief --json` for the target file | `17,328` | `4,328` | token-efficient source summary, not the same task as co-change |
+| raw target file | `35,609` | `8,625` | what the agent would spend if it opens only the target |
+| raw target + top companion test | `59,295` | `14,179` | common first inspection pair |
+| raw top 10 `related` companion files | `165,154` | `37,436` | why a shortlist matters before opening files |
+| raw target + top 10 companion files | `200,763` | `46,061` | broad speculative read |
+
+After compacting the default output, `related`'s text shortlist is slightly
+smaller than Codegraph's text co-change table for this target, while still
+requiring no database. The larger win is workflow shape: a no-index, on-demand
+history call gives Codex a roughly 230-token shortlist that can prevent a
+14k-46k token source-reading detour. If the agent only needs file names,
+extracting paths from JSON was about 170 tokens in this run.
+
+I then varied the target file across five recent VS Code code files. Compact
+text stayed smaller than Codegraph text in all five rows, with a median of
+`231` tokens for `related` vs `331` for Codegraph. Query latency over seven
+runs per target had a median of `25.3ms` for `related` vs `159.3ms` for
+Codegraph, after Codegraph's DB and co-change data already existed.
+
+One non-code check is also important: `package.json` returned useful manifest
+and lockfile partners from `related`, while Codegraph reported no co-change data
+for that file in its graph database. That is the content-blind advantage in
+practice, not just a positioning claim.
+
+I also ran real `codex exec` measurements on `/tmp/related-vscode` with Codex
+CLI `0.133.0`, read-only sandboxing, and the same "find companion files before
+editing" prompt. Both runs found the same first file to inspect:
+`src/vs/platform/sandbox/test/common/terminalSandboxEngine.test.ts`.
+
+| Codex run | reported input tokens | non-cached input tokens | output tokens | result |
+|---|---:|---:|---:|---|
+| forced to use `related query` first | `29,792` | `12,128` | `229` | same top companion file |
+| forced to use `codegraph co-change` first | `44,800` | `11,392` | `330` | same top companion file |
+
+The total input-token numbers include Codex's fixed harness and prompt-cache
+behavior, so the stable comparison is the command-output token table above. The
+real Codex runs are included as a smoke test that the measured output is usable
+by an agent on a large repository, not as a universal billing benchmark.
 
 See [COMPARISON.md](COMPARISON.md) for a broader public-docs-based comparison
 against nearby tools.

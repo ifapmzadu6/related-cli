@@ -1,9 +1,11 @@
 # Comparison
 
 Checked on 2026-05-24 JST from public product pages, docs, and repository
-descriptions. This is a feature comparison, not an apples-to-apples benchmark:
-most comparable products are hosted, MCP-first, or multi-signal systems that
-cannot be run locally in the same VS Code holdout benchmark without extra setup.
+descriptions; npm package versions and local Codegraph/token measurements were
+rechecked on 2026-05-25 JST. This is a feature comparison, not an
+apples-to-apples benchmark: most comparable products are hosted, MCP-first, or
+multi-signal systems that cannot be run locally in the same VS Code holdout
+benchmark without extra setup.
 
 ## Summary
 
@@ -98,12 +100,22 @@ Sources:
 
 ### Codegraph
 
-Codegraph publicly describes a source graph backed by Tree-sitter and SQLite,
-served through MCP, and includes `codegraph co-change src/queries.js` for
-co-change partners. This is close at the command level, but the project is still
-centered on code parsing and a larger graph database.
+This comparison refers to `@optave/codegraph` / `optave/ops-codegraph-tool`.
+Its public README describes a local Tree-sitter source graph stored in SQLite,
+CLI and MCP access, function-level dependency analysis, imports/callers,
+dataflow, CFG, semantic search, role classification, CI gates, incremental
+rebuilds, and Git co-change.
 
-Source: https://mcpserver.space/mcp/codegraph/
+Codegraph is the closest public command-level match because it has
+`codegraph co-change <file>`. On the VS Code target measured below, Codegraph
+and `related` returned the same top companion file. The difference is scope:
+Codegraph's co-change feature is part of a full source graph system; `related`
+is only the historical companion-file query and does not build source state.
+
+Sources:
+
+- https://github.com/optave/ops-codegraph-tool
+- https://www.npmjs.com/package/@optave/codegraph
 
 ### CodeScene
 
@@ -152,9 +164,12 @@ On `microsoft/vscode`, target
 
 - `related query` x20: on-demand timings are tracked in `MEASUREMENTS.md`
 - `codegraph build` with optional heavy analyses disabled: `158.12s`, `.codegraph`
-  `528 MiB`
+  `527 MiB`
 - `codegraph co-change --analyze`: `2.84s`
-- `codegraph co-change <file>` x20: `3.76s`, about `0.188s/query`
+- `related query <file>` x20 on the same target in the current run: `1.14s`,
+  about `0.057s/query`
+- `codegraph co-change <file>` x20 in the current run: `6.21s`, about
+  `0.311s/query`
 - `sourcebook scan-history`: `3.15s`
 - `sourcebook preflight --file` x20: `174.68s`, about `8.734s/query`
 
@@ -164,6 +179,44 @@ Both Codegraph and `related` returned the same top companion file for the target
 This supports a narrow speed claim: for the file-to-related-files co-change
 lookup, `related` is faster and much smaller because it does not build source
 graphs or run broader preflight analysis.
+
+## Token Positioning
+
+Token-efficiency claims need to be scoped carefully because nearby tools answer
+different questions. Codegraph has token-efficient source summaries such as
+`brief`, while `related` returns only a historical file shortlist.
+
+On the same VS Code target used for speed measurements, with `tiktoken`
+`cl100k_base`:
+
+| artifact | tokens | interpretation |
+|---|---:|---|
+| `related query` compact text output, top 10 | `231` | on-demand related-file shortlist |
+| `related query --json`, top 10 | `980` | structured tool output |
+| paths extracted from `related --json` | `170` | smallest file-name-only shortlist |
+| `codegraph co-change` text output, top 10 | `331` | co-change table after DB/co-change setup |
+| `codegraph co-change --json`, top 10 | `797` | structured co-change output |
+| `codegraph brief --json` for the target | `4,328` | source summary, not a co-change query |
+| raw target file | `8,625` | source read |
+| raw target + top companion test | `14,179` | common first inspection pair |
+| raw top 10 companion files | `37,436` | speculative broad read |
+| raw target + top 10 companion files | `46,061` | broad speculative read |
+
+The scoped result: `related`'s compact default text output is slightly smaller
+than Codegraph's text co-change table on this target, and it does not require a
+source-graph database. The larger token advantage is the workflow shape: a
+no-index, roughly 230-token shortlist can stop an agent from spending 14k-46k
+tokens opening source files before it knows which files matter. When the agent
+only needs file names, paths extracted from `related --json` were about 170
+tokens.
+
+A five-target VS Code sweep over recent code files showed the same direction:
+`related` compact text was smaller in all five rows, with median `231` tokens vs
+Codegraph `331`. The same sweep had median query latency `25.3ms` for `related`
+vs `159.3ms` for Codegraph after Codegraph's `.codegraph` database and
+co-change analysis already existed. For `package.json`, Codegraph returned no
+co-change data while `related` returned manifest and lockfile partners, which is
+the practical value of staying content-blind.
 
 The local apples-to-apples implementation test also compares `related` with
 implementations that compute the same co-change answer directly from Git history

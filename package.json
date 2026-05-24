@@ -1,6 +1,6 @@
 {
   "name": "related-cli",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Content-blind related-file ranking from Git co-change history",
   "license": "MIT",
   "repository": {
