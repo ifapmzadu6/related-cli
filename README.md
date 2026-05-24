@@ -27,7 +27,8 @@ does not vendor the binary and does not require a global install; it calls the
 published npm package with `npx -y --package related-cli@latest related ...`.
 
 Clone the repository once, then copy the skill folder into your agent's skill
-directory:
+directory. Re-run the install script after pulling this repository to update the
+copied skill instructions:
 
 ```sh
 git clone --depth 1 https://github.com/ifapmzadu6/related-cli.git
@@ -37,9 +38,7 @@ cd related-cli
 ### Codex
 
 ```sh
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
-rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/find-related-files"
-cp -R skills/find-related-files "${CODEX_HOME:-$HOME/.codex}/skills/"
+scripts/install_skill.sh codex
 ```
 
 Restart Codex after installing the skill.
@@ -49,17 +48,13 @@ Restart Codex after installing the skill.
 Personal install, available in all projects:
 
 ```sh
-mkdir -p "$HOME/.claude/skills"
-rm -rf "$HOME/.claude/skills/find-related-files"
-cp -R skills/find-related-files "$HOME/.claude/skills/"
+scripts/install_skill.sh claude
 ```
 
 Project install, checked into a single repository:
 
 ```sh
-mkdir -p .claude/skills
-rm -rf .claude/skills/find-related-files
-cp -R /path/to/related-cli/skills/find-related-files .claude/skills/
+/path/to/related-cli/scripts/install_skill.sh claude-project "$PWD"
 ```
 
 Claude Code can load the skill automatically from its description, or you can
@@ -85,11 +80,13 @@ large repositories and may stop before an exact full history walk. Use
 `--history-backend git` when exact Git history is more important than speed, or
 `--history-backend pack-scan` for a deeper pack-only scan.
 
-If the top results all look like broad release, formatting, or initial-commit
-churn, retry with a smaller commit-size filter before trusting the ranking:
+If the top results all look like broad release, dependency, formatting, or
+initial-commit churn, inspect evidence and retry with a tighter commit-size
+filter plus result exclusions before trusting the ranking:
 
 ```sh
-npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-files-per-commit 20
+npx -y --package related-cli@latest related query src/auth.ts --top 20 --evidence 3
+npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-files-per-commit 10 --exclude '*.lock,.github/workflows/*'
 ```
 
 For compact LLM-tool output, `query` and `diff` omit per-commit evidence by

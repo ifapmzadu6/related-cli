@@ -17,34 +17,40 @@ that text search may miss.
 Run from the repository root when possible:
 
 ```sh
-npx -y --package related-cli@latest related query path/to/file --top 20 --json
+env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --json
 ```
 
 Use `--repo PATH` only when querying another checkout from outside that repo:
 
 ```sh
-npx -y --package related-cli@latest related query path/to/file --repo /path/to/repo --top 20 --json
+env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --repo /path/to/repo --top 20 --json
 ```
 
 For staged edits, ask for related files for the changed set:
 
 ```sh
-npx -y --package related-cli@latest related diff --staged --top 20 --json
+env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20 --json
 ```
 
 Open the strongest relevant results before making edits. Treat the ranking as a
 context hint, not proof that a file must change.
 
-If the top results look like broad release, formatting, generated, or initial
-commit churn, retry with a tighter commit-size filter before opening files:
+If the JSON output includes `hints`, follow them before opening many files.
+
+If the top results look like broad release, dependency, formatting, generated,
+or initial commit churn, inspect evidence and retry with a tighter commit-size
+filter plus result exclusions before opening files:
 
 ```sh
-npx -y --package related-cli@latest related query path/to/file --top 20 --max-files-per-commit 20 --json
+env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --evidence 3 --json
+env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --max-files-per-commit 10 --exclude '*.lock,.github/workflows/*' --json
 ```
 
 ## Options
 
 - Add `--evidence N` when examples of shared commits would help.
+- Add `--exclude PATTERNS` to hide comma-separated path patterns such as
+  `*.lock,.github/workflows/*` from results.
 - Use `explain file-a file-b --json` to inspect one relationship.
 - Use `--history-backend git` when exact Git history is more important than
   low latency.
@@ -54,4 +60,6 @@ npx -y --package related-cli@latest related query path/to/file --top 20 --max-fi
 ## Distribution Notes
 
 Do not require global installation. Use `related-cli@latest` so the skill picks
-up CLI fixes and performance improvements automatically.
+up CLI fixes and performance improvements automatically. The skill instructions
+themselves are copied into the agent, so update them by pulling this repository
+and rerunning `scripts/install_skill.sh codex` or `scripts/install_skill.sh claude`.

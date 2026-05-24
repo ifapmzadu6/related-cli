@@ -139,6 +139,8 @@ struct QueryOutput {
     target: String,
     mode: String,
     related: Vec<ResultItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    hints: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -286,10 +288,10 @@ fn print_usage<W: Write>(out: &mut W) -> AnyResult<()> {
         r#"related: content-blind related-file ranking from Git co-change history
 
 Usage:
-  related query <file> [--mode direct|pagerank|path|hot] [--top N] [--json]
+  related query <file> [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS] [--json]
   related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
   related explain <file-a> <file-b> [--max-commits N] [--json]
-  related diff [--staged] [--mode direct|pagerank|path|hot] [--top N] [--max-commits N]
+  related diff [--staged] [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS] [--max-commits N]
   related eval [--repo PATH] [--test-commits N] [--train-commits N]
 
 The graph is built on demand from files that changed together in Git commits.
@@ -319,6 +321,7 @@ fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "half-life-days",
             "jobs",
             "scan-commits",
+            "exclude",
         ],
         &["json", "on-demand"],
     )?;
@@ -333,15 +336,20 @@ fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<
     let mode = flag_string(parsed, "mode", "direct");
     let top = flag_usize(parsed, "top", DEFAULT_TOP)?;
     let json_out = flag_bool(parsed, "json");
+    let exclude_patterns = parse_exclude_patterns(parsed);
     let config = parse_on_demand_config(parsed, 0)?;
 
     let root = git_root(&repo)?;
     let target = normalize_input_path(&root, &parsed.positionals[0]);
-    let related = query_on_demand(&root, &target, &mode, top, &config)?;
+    let query_top = filtered_query_top(top, &exclude_patterns);
+    let mut related = query_on_demand(&root, &target, &mode, query_top, &config)?;
+    filter_related_results(&mut related, &exclude_patterns, top);
+    let hints = query_hints(&related, &exclude_patterns);
     let output = QueryOutput {
         target,
         mode: format!("{mode}:on-demand:{:?}", config.backend),
         related,
+        hints,
     };
     if json_out {
         write_json(out, &output)?;
@@ -629,6 +637,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "half-life-days",
             "jobs",
             "scan-commits",
+            "exclude",
         ],
         &["staged", "json"],
     )?;
@@ -641,6 +650,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let top = flag_usize(&parsed, "top", DEFAULT_TOP)?;
     let staged = flag_bool(&parsed, "staged");
     let json_out = flag_bool(&parsed, "json");
+    let exclude_patterns = parse_exclude_patterns(&parsed);
     let config = parse_on_demand_config(&parsed, 0)?;
 
     let root = git_root(&repo)?;
@@ -651,8 +661,9 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
 
     let changed_set: HashSet<String> = changed.iter().cloned().collect();
     let mut aggregate: HashMap<String, ResultItem> = HashMap::default();
+    let query_top = filtered_query_top(top, &exclude_patterns);
     for target in &changed_set {
-        for mut result in query_on_demand(&root, target, &mode, top, &config)? {
+        for mut result in query_on_demand(&root, target, &mode, query_top, &config)? {
             if changed_set.contains(&result.path) {
                 continue;
             }
@@ -664,11 +675,13 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         }
     }
     let mut related: Vec<ResultItem> = aggregate.into_values().collect();
-    truncate_top_results(&mut related, top);
+    filter_related_results(&mut related, &exclude_patterns, top);
+    let hints = query_hints(&related, &exclude_patterns);
     let output = QueryOutput {
         target: changed.join(","),
         mode,
         related,
+        hints,
     };
     if json_out {
         write_json(out, &output)?;
@@ -818,6 +831,133 @@ fn flag_f64(parsed: &ParsedArgs, name: &str, default: f64) -> AnyResult<f64> {
     value
         .parse()
         .map_err(|err| format!("invalid --{name} value {value:?}: {err}").into())
+}
+
+fn parse_exclude_patterns(parsed: &ParsedArgs) -> Vec<String> {
+    let Some(value) = flag_optional_string(parsed, "exclude") else {
+        return Vec::new();
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn filtered_query_top(top: usize, exclude_patterns: &[String]) -> usize {
+    if exclude_patterns.is_empty() {
+        top
+    } else {
+        top.saturating_mul(4).max(top.saturating_add(20))
+    }
+}
+
+fn filter_related_results(results: &mut Vec<ResultItem>, exclude_patterns: &[String], top: usize) {
+    if !exclude_patterns.is_empty() {
+        results.retain(|item| !path_matches_any_pattern(&item.path, exclude_patterns));
+    }
+    truncate_top_results(results, top);
+}
+
+fn query_hints(results: &[ResultItem], exclude_patterns: &[String]) -> Vec<String> {
+    let mut hints = Vec::new();
+    let window = results.len().min(8);
+    if window == 0 {
+        return hints;
+    }
+    let broad_change_results = results
+        .iter()
+        .take(window)
+        .filter(|item| looks_like_broad_change_path(&item.path))
+        .count();
+    if broad_change_results >= 4 && broad_change_results * 2 >= window {
+        if exclude_patterns.is_empty() {
+            hints.push(
+                "Top results include several lockfile, manifest, workflow, or release-doc paths. Retry with --max-files-per-commit 10 --exclude '*.lock,.github/workflows/*' --evidence 3 before opening many files."
+                    .to_string(),
+            );
+        } else {
+            hints.push(
+                "Top results still look broad-change heavy. Inspect --evidence 3 or lower --max-files-per-commit further."
+                    .to_string(),
+            );
+        }
+    }
+    hints
+}
+
+fn path_matches_any_pattern(path: &str, patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| path_matches_pattern(path, pattern))
+}
+
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    if pattern.contains('*') {
+        return wildcard_match(pattern, path) || wildcard_match(pattern, path_basename(path));
+    }
+    path == pattern || path.ends_with(&format!("/{pattern}")) || path_basename(path) == pattern
+}
+
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    if !pattern.contains('*') {
+        return pattern == text;
+    }
+    let parts: Vec<&str> = pattern.split('*').collect();
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
+    let mut offset = 0usize;
+
+    for (idx, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if idx == 0 && anchored_start {
+            let Some(rest) = text.get(offset..) else {
+                return false;
+            };
+            if !rest.starts_with(part) {
+                return false;
+            }
+            offset += part.len();
+            continue;
+        }
+        let Some(rest) = text.get(offset..) else {
+            return false;
+        };
+        let Some(found) = rest.find(part) else {
+            return false;
+        };
+        offset += found + part.len();
+    }
+
+    if anchored_end && let Some(last) = parts.iter().rev().find(|part| !part.is_empty()) {
+        return text.ends_with(last);
+    }
+    true
+}
+
+fn looks_like_broad_change_path(path: &str) -> bool {
+    let basename = path_basename(path);
+    matches!(
+        basename,
+        "Cargo.lock"
+            | "Cargo.toml"
+            | "package-lock.json"
+            | "package.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lockb"
+            | "poetry.lock"
+            | "uv.lock"
+            | "README.md"
+            | "CHANGELOG.md"
+            | "rust-toolchain.toml"
+    ) || path.starts_with(".github/workflows/")
 }
 
 fn default_jobs() -> usize {
@@ -4558,6 +4698,9 @@ fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
         }
         writeln!(out, "  {}", item.reason)?;
     }
+    for hint in &output.hints {
+        writeln!(out, "hint: {hint}")?;
+    }
     Ok(())
 }
 
@@ -4808,6 +4951,54 @@ mod tests {
         assert_eq!(json["mode"].as_str(), Some("direct:on-demand:GitCli"));
         assert_eq!(json["related"][0]["path"].as_str(), Some("b.md"));
         assert_eq!(json["related"][0]["cochanges"].as_u64(), Some(2));
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn cli_query_supports_exclude_patterns() {
+        let repo = new_test_repo();
+        write_commit(
+            &repo,
+            "pair with lockfile",
+            &[
+                ("a.md", "a1\n"),
+                ("b.md", "b1\n"),
+                ("Cargo.lock", "lock1\n"),
+            ],
+        );
+        write_commit(
+            &repo,
+            "pair with lockfile again",
+            &[
+                ("a.md", "a2\n"),
+                ("b.md", "b2\n"),
+                ("Cargo.lock", "lock2\n"),
+            ],
+        );
+
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+                "--max-commits".to_string(),
+                "20".to_string(),
+                "--exclude".to_string(),
+                "*.lock".to_string(),
+                "--json".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let json = parse_json_output(&output);
+        let related = json["related"].as_array().unwrap();
+        assert!(related.iter().any(|item| item["path"] == "b.md"));
+        assert!(!related.iter().any(|item| item["path"] == "Cargo.lock"));
 
         fs::remove_dir_all(repo).ok();
     }
