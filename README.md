@@ -15,6 +15,12 @@
 `related` is a small CLI that ranks files related to a target file using only Git
 co-change history.
 
+The token reduction can be huge: in a VS Code smoke test, Codex found the same
+first companion file from a `231`-token `related` shortlist that took `16,381`
+command-output tokens when forced to read source bodies without `related`.
+Direct artifact measurements showed the same shortlist replacing `8.6k` to
+`46.1k` tokens of speculative pre-read file context.
+
 It intentionally does not parse source code, imports, symbols, embeddings, or file
 contents. That makes the signal language-agnostic and useful for code, docs,
 configs, migrations, prompts, runbooks, and any other files tracked in Git.
@@ -280,7 +286,36 @@ Measured on the same VS Code checkout and target above, using `tiktoken`
 | raw top 10 `related` companion files | `165,154` | `37,436` | why a shortlist matters before opening files |
 | raw target + top 10 companion files | `200,763` | `46,061` | broad speculative read |
 
-After compacting the default output, `related`'s text shortlist is slightly
+Framed as `related-cli` versus no `related-cli`, the measured context-selection
+cost on this target was:
+
+| workflow | context sent before choosing files | approx tokens | vs `related` text |
+|---|---|---:|---:|
+| with `related-cli` | Compact top-10 co-change shortlist | `231` | baseline |
+| with `related-cli` | Top-10 paths only | `170` | `26%` smaller |
+| without `related-cli` | Open the target file body first | `8,625` | `37.3x` more |
+| without `related-cli` | Open target + top companion test body | `14,179` | `61.4x` more |
+| without `related-cli` | Speculatively open target + all top-10 companion bodies | `46,061` | `199.4x` more |
+
+I also ran two real read-only `codex exec` smoke tests on the same target. Both
+found the same first file to inspect:
+`src/vs/platform/sandbox/test/common/terminalSandboxEngine.test.ts`.
+
+| Codex run | command output tokens | reported input tokens | non-cached input tokens | output tokens |
+|---|---:|---:|---:|---:|
+| forced to use `related query` first | `231` | `29,809` | `12,145` | `211` |
+| forbidden from using `related`/co-change tools, forced to read source bodies | `16,381` | `137,045` | `62,549` | `1,300` |
+
+That is a `97.3%` to `99.5%` reduction in pre-read context when the alternative
+is opening source files to discover companion context. This is not a claim that
+every no-tool agent must read exactly those files; simple `rg` or `git log`
+probes can be small too, but they answer different questions and require the
+agent to guess the right lexical query. The holdout eval checks that the shorter
+history signal is still useful: on the same VS Code run, the default `direct`
+history ranking hit@10 was `71.9%`, versus `54.6%` for a path/name baseline and
+`28.3%` for a hot-file baseline; `pagerank` reached `78.7%`.
+
+After compacting the default output, `related`'s text shortlist is also slightly
 smaller than Codegraph's text co-change table for this target, while still
 requiring no database. The larger win is workflow shape: a no-index, on-demand
 history call gives Codex a roughly 230-token shortlist that can prevent a
