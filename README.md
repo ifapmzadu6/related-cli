@@ -20,20 +20,71 @@ operational relationship. `related` turns that history into a weighted graph:
 Queries can use either direct co-change ranking or Personalized PageRank over the
 co-change graph.
 
-## Quick Start
+## Skill Installation
+
+This repository ships a portable skill at `skills/find-related-files`. The skill
+does not vendor the binary and does not require a global install; it calls the
+published npm package with `npx -y --package related-cli@latest related ...`.
+
+Clone the repository once, then copy the skill folder into your agent's skill
+directory:
+
+```sh
+git clone --depth 1 https://github.com/ifapmzadu6/related-cli.git
+cd related-cli
+```
+
+### Codex
+
+```sh
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+rm -rf "${CODEX_HOME:-$HOME/.codex}/skills/find-related-files"
+cp -R skills/find-related-files "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
+
+Restart Codex after installing the skill.
+
+### Claude Code
+
+Personal install, available in all projects:
+
+```sh
+mkdir -p "$HOME/.claude/skills"
+rm -rf "$HOME/.claude/skills/find-related-files"
+cp -R skills/find-related-files "$HOME/.claude/skills/"
+```
+
+Project install, checked into a single repository:
+
+```sh
+mkdir -p .claude/skills
+rm -rf .claude/skills/find-related-files
+cp -R /path/to/related-cli/skills/find-related-files .claude/skills/
+```
+
+Claude Code can load the skill automatically from its description, or you can
+invoke it directly with `/find-related-files`.
+
+## CLI
+
+The skill is the intended entry point for agent use. The CLI remains available
+for direct checks:
 
 ```sh
 npx -y --package related-cli@latest related query src/auth.ts --top 20
+npx -y --package related-cli@latest related diff --staged --top 20
 ```
 
-The npm package is designed to bundle the prebuilt `related` binaries for the
-supported macOS, Linux, and Windows CPU/OS combinations, so installing it does
-not require Rust, Cargo, or a build toolchain. It does not download a binary at
-install time; the small platform binaries are shipped inside the npm tarball.
-For LLM skills and tools, global installation is optional: invoke it through
-`npx`/`npm exec` from the target repository.
+By default commands run against the current directory's Git repository. Use
+`--repo PATH` only when querying another checkout from outside that repository.
+No persistent index is created; the graph is built on demand from the target
+file's Git history.
 
-## Build
+For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
+default. Add `--evidence N` when example commits would help, or use
+`explain file-a file-b` for one focused relationship.
+
+## Local Development
 
 ```sh
 cargo build --release
@@ -42,66 +93,6 @@ cargo run --release -- query src/auth.ts --top 20
 
 The release profile uses thin LTO and a single codegen unit because the CLI is
 intended to be called frequently as a low-latency tool.
-
-## Usage
-
-```sh
-npx -y --package related-cli@latest related query src/auth.ts --top 20
-npx -y --package related-cli@latest related query src/auth.ts --mode direct --json
-npx -y --package related-cli@latest related query src/auth.ts --history-backend git
-npx -y --package related-cli@latest related query src/auth.ts --history-backend hybrid
-npx -y --package related-cli@latest related query src/auth.ts --history-backend git-remove-empty
-npx -y --package related-cli@latest related explain src/auth.ts tests/auth.test.ts
-npx -y --package related-cli@latest related diff --staged
-```
-
-`related` no longer writes or reads a persistent index. `query`, `explain`, and
-`diff` build the needed co-change graph on demand for the target file or changed
-files. The default window is the target file's latest `1000` touching commits,
-not the repository's latest `1000` commits.
-By default commands run against the current directory's Git repository. Use
-`--repo PATH` only when querying another checkout from outside that repository.
-
-The default `pack-fast` backend reads `.git/objects/pack` and `.idx` files
-directly, without invoking Git or a Git library for the hot path. It memory maps
-pack files, binary-searches pack indexes, inflates commit/tree objects, applies
-pack deltas, walks path history, and performs tree diffs in process. Pack
-inflation uses the `zlib-rs` backend through `flate2` over the mmap slice, and
-inflated object bytes are shared across the query-local caches.
-`pack-fast` is intentionally latency-bounded for LLM-tool use: it walks at most
-`17,500` recent commits by default, and after the first `1,000` walked commits
-can stop once it has seen `256` target-touching commits or `5,000` walked
-commits without another target hit. It does not inspect the returned ranking or
-top-K stability to decide when to stop. This can still change co-change counts
-versus exact Git history because the traversal is bounded. Use
-`--history-backend git` for Git-exact counts, or
-`--history-backend pack-scan --jobs N` for a deeper pack-only scan with explicit
-parallel diff expansion.
-
-For compact LLM-tool output, `query` and `diff` omit per-commit evidence by
-default. Add `--evidence N` when the response should include example commits, or
-use `explain` for a focused pair.
-
-Alternative on-demand backends are also available for measurement:
-`hybrid`, `gix`, `git`, `git-remove-empty`, `git-batch`,
-`git-batch-parallel`, `git-diff-tree`, `git-diff-tree-parallel`,
-`git-rev-list`, `pack-fast`, and `pack-scan`. The `hybrid` backend keeps Git for
-target commit selection and uses `gix` for Rust-side diff expansion.
-`git-rev-list` is a faster approximate backend: it selects commits with
-`git rev-list`, which can change co-change counts while often preserving the top
-companion paths.
-`git-remove-empty` adds Git's `--remove-empty` path limiter and can be much
-faster for files with short visible history, but it can change scores, so it is
-explicit only. `pack-scan` uses the same pack-only implementation as
-`pack-fast`, but does not apply the default latency-bounded cutoff. If
-`--scan-commits` is set, `pack-scan` applies only that explicit scanned-commit
-cap. `pack-scan` uses multiple threads for diff expansion only when `--jobs N`
-is provided explicitly.
-
-Earlier `git2`/plumbing experiments on the VS Code checkout were not adopted as
-defaults because they were less robust on shallow/promisor clones or not
-equivalent. See
-[MEASUREMENTS.md](MEASUREMENTS.md#direct-git-file-reading-feasibility).
 
 ## Evaluation
 
