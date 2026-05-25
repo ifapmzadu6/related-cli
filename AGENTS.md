@@ -87,11 +87,12 @@ npx -y npm@latest publish --access public
 Do not replace this with the runner's plain `npm stage publish`; older bundled
 npm versions may not include the `stage` command.
 
-### GitHub Actions approval
+### GitHub Actions release checks
 
-The `npm-publish` job uses the `npm-release` environment. If that environment
-requires reviewer approval, approve the pending deployment in the GitHub Actions
-UI before expecting the npm step to run.
+The `npm-publish` job uses the `npm-release` environment because npm Trusted
+Publishing is configured for that environment. The environment should not require
+reviewer approval; a tag push should run through to npm publish without a manual
+GitHub Actions deployment approval.
 
 Useful checks:
 
@@ -123,8 +124,7 @@ tag passed in `tag`.
 The current repository setting is `publish`. npm Trusted Publishing is
 configured for the `release.yml` workflow and `npm-release` environment, so the
 release job can publish directly without an npm token or a per-release npm
-browser approval. Keep the GitHub `npm-release` environment approval as the
-human gate.
+browser approval.
 
 Use `stage` only when the project intentionally wants an extra npm-side manual
 approval. With staged publishing, a successful GitHub Actions run can still
