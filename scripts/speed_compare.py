@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import argparse
 import collections
-import json
 import math
 import subprocess
 import time
@@ -212,6 +211,32 @@ def git_show_loop(repo, target, max_commits, max_files, half_life_days):
     return rank_direct_from_commits(commits, target, max_files, half_life_days)
 
 
+def parse_related_text(raw):
+    results = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        score = 0.0
+        cochanges = 0
+        last_seen = ""
+        for field in parts[2:]:
+            if field.startswith("s="):
+                try:
+                    score = float(field.removeprefix("s="))
+                except ValueError:
+                    score = 0.0
+            elif field.startswith("co="):
+                try:
+                    cochanges = int(field.removeprefix("co="))
+                except ValueError:
+                    cochanges = 0
+            elif field.startswith("seen="):
+                last_seen = field.removeprefix("seen=")
+        results.append((score, parts[1], cochanges, last_seen))
+    return results
+
+
 def related_query(
     binary,
     repo,
@@ -239,11 +264,9 @@ def related_query(
             str(max_files_per_commit),
             "--half-life-days",
             str(half_life_days),
-            "--json",
         ]
     )
-    data = json.loads(raw)
-    return [(item["score"], item["path"], item.get("cochanges", 0), item.get("last_seen", "")) for item in data["related"]]
+    return parse_related_text(raw)
 
 
 def measure(label, runs, fn):

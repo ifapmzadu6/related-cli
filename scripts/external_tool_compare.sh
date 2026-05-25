@@ -35,7 +35,7 @@ echo "## related on-demand query x20" >> "$out_dir/summary.md"
 echo '```text' >> "$out_dir/summary.md"
 /usr/bin/time -p bash -c '
   for _ in $(seq 1 20); do
-    "$0" query "$1" --repo "$2" --since "$3" --mode direct --top 10 --json >/dev/null
+    "$0" query "$1" --repo "$2" --since "$3" --mode direct --top 10 >/dev/null
   done
 ' "$related_bin" "$target" "$repo" "$since" >> "$out_dir/summary.md" 2>&1
 echo '```' >> "$out_dir/summary.md"

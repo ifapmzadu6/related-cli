@@ -123,8 +123,8 @@ npx -y --package related-cli@latest related query src/auth.ts --top 20 --max-fil
 
 The default text output is compact for LLM-tool use: it prints ranked paths plus
 short `co=` counts, and `query`/`diff` omit per-commit evidence by default. Add
-`--json` for structured automation, `--evidence N` when example commits would
-help, or use `explain file-a file-b` for one focused relationship.
+`--evidence N` when example commits would help, or use `explain file-a file-b`
+for one focused relationship.
 
 ## Comparison
 
@@ -145,7 +145,7 @@ needs immediately before touching one file.
 - no persistent index
 - no source parsing, embeddings, imports, ASTs, or file contents
 - works for docs, prompts, configs, migrations, and code
-- returns compact JSON suitable for an LLM tool call
+- returns compact text suitable for an LLM tool call
 - can show evidence commits when the agent needs to verify the relationship
 
 The bet is that Git history is already a behavior graph of the project. If two
@@ -278,11 +278,7 @@ Measured on the same VS Code checkout and target above, using `tiktoken`
 | artifact sent to the agent | bytes | approx tokens | note |
 |---|---:|---:|---|
 | `related query` text output, top 10 | `893` | `231` | no index; compact paths and co-change counts |
-| `related query --json`, top 10 | `2,924` | `980` | structured JSON for tools |
-| `jq -r '.related[].path'` from `related --json` | `732` | `170` | paths only when an agent wants the smallest shortlist |
 | `codegraph co-change` text output, top 10 | `1,162` | `331` | requires existing `.codegraph` DB and co-change analysis |
-| `codegraph co-change --json`, top 10 | `2,433` | `797` | structured co-change output |
-| `codegraph brief --json` for the target file | `17,328` | `4,328` | token-efficient source summary, not the same task as co-change |
 | raw target file | `35,609` | `8,625` | what the agent would spend if it opens only the target |
 | raw target + top companion test | `59,295` | `14,179` | common first inspection pair |
 | raw top 10 `related` companion files | `165,154` | `37,436` | why a shortlist matters before opening files |
@@ -294,7 +290,6 @@ cost on this target was:
 | workflow | context sent before choosing files | approx tokens | vs `related` text |
 |---|---|---:|---:|
 | with `related-cli` | Compact top-10 co-change shortlist | `231` | baseline |
-| with `related-cli` | Top-10 paths only | `170` | `26%` smaller |
 | without `related-cli` | Open the target file body first | `8,625` | `37.3x` more |
 | without `related-cli` | Open target + top companion test body | `14,179` | `61.4x` more |
 | without `related-cli` | Speculatively open target + all top-10 companion bodies | `46,061` | `199.4x` more |
@@ -321,8 +316,7 @@ After compacting the default output, `related`'s text shortlist is also slightly
 smaller than Codegraph's text co-change table for this target, while still
 requiring no database. The larger win is workflow shape: a no-index, on-demand
 history call gives Codex a roughly 230-token shortlist that can prevent a
-14k-46k token source-reading detour. If the agent only needs file names,
-extracting paths from JSON was about 170 tokens in this run.
+14k-46k token source-reading detour.
 
 I then varied the target file across five recent VS Code code files. Compact
 text stayed smaller than Codegraph text in all five rows, with a median of

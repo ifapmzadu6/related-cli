@@ -50,7 +50,7 @@ run_query_timing() {
     local timing="$out_dir/query-$mode.time.txt"
     /usr/bin/time -p bash -c '
       for _ in $(seq 1 "$0"); do
-        "$1" query "$2" --repo "$3" --mode "$4" --top 10 --json >/dev/null
+        "$1" query "$2" --repo "$3" --mode "$4" --top 10 >/dev/null
       done
     ' "$runs" "$bin" "$target" "$repo" "$mode" 2> "$timing"
     echo "$mode" >> "$out_dir/summary.md"

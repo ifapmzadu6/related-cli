@@ -36,7 +36,7 @@ Open the strongest relevant results before making edits. Treat the ranking as a
 context hint, not proof that a file must change.
 
 If the output includes `hint:` lines, follow them before opening many files. Add
-`--json` when another tool needs structured output instead of compact text.
+`--evidence N` when another tool needs example commits behind the ranking.
 
 If the top results look like broad release, dependency, formatting, generated,
 or initial commit churn, inspect evidence and retry with a tighter commit-size
@@ -52,8 +52,7 @@ env npm_config_loglevel=error npx -y --package related-cli@latest related query 
 - Add `--evidence N` when examples of shared commits would help.
 - Add `--exclude PATTERNS` to hide comma-separated path patterns such as
   `*.lock,*-lock.*,*lockb,.github/workflows/*` from results.
-- Add `--json` for structured machine-readable output.
-- Use `explain file-a file-b --json` to inspect one relationship.
+- Use `explain file-a file-b` to inspect one relationship.
 - Use `--history-backend git` when exact Git history is more important than
   low latency.
 - Use the default `pack-fast` backend for a fast approximate pre-edit check in

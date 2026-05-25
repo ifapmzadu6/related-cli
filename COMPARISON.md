@@ -19,7 +19,7 @@ The narrower position for `related` is:
 - Git co-change history only
 - no source parsing, imports, AST, symbols, embeddings, or file contents
 - direct co-change and Personalized PageRank over the co-change graph
-- `related query <file>` JSON output for LLM tools
+- `related query <file>` compact text output for LLM tools
 - `related explain <a> <b>` evidence commits
 - built-in holdout evaluation with `direct`, `pagerank`, and `path` baselines
 
@@ -135,7 +135,7 @@ There are already close tools. The open space for `related` is not "no one uses
 co-change for agents." The open space is a smaller, composable tool:
 
 ```sh
-related query path/to/file --json
+related query path/to/file
 related explain path/to/file other/file
 related eval
 ```
@@ -192,11 +192,7 @@ On the same VS Code target used for speed measurements, with `tiktoken`
 | artifact | tokens | interpretation |
 |---|---:|---|
 | `related query` compact text output, top 10 | `231` | on-demand related-file shortlist |
-| `related query --json`, top 10 | `980` | structured tool output |
-| paths extracted from `related --json` | `170` | smallest file-name-only shortlist |
 | `codegraph co-change` text output, top 10 | `331` | co-change table after DB/co-change setup |
-| `codegraph co-change --json`, top 10 | `797` | structured co-change output |
-| `codegraph brief --json` for the target | `4,328` | source summary, not a co-change query |
 | raw target file | `8,625` | source read |
 | raw target + top companion test | `14,179` | common first inspection pair |
 | raw top 10 companion files | `37,436` | speculative broad read |
@@ -206,9 +202,7 @@ The scoped result: `related`'s compact default text output is slightly smaller
 than Codegraph's text co-change table on this target, and it does not require a
 source-graph database. The larger token advantage is the workflow shape: a
 no-index, roughly 230-token shortlist can stop an agent from spending 14k-46k
-tokens opening source files before it knows which files matter. When the agent
-only needs file names, paths extracted from `related --json` were about 170
-tokens.
+tokens opening source files before it knows which files matter.
 
 A five-target VS Code sweep over recent code files showed the same direction:
 `related` compact text was smaller in all five rows, with median `231` tokens vs

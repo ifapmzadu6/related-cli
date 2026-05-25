@@ -11,8 +11,6 @@ gix = { version = "0.83", default-features = false, features = ["blob-diff", "ma
 memmap2 = "0.9"
 rayon = "1"
 rustc-hash = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 [profile.release]
 lto = "thin"

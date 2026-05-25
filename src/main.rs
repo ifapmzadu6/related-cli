@@ -1,7 +1,6 @@
 use gix::bstr::ByteSlice;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::env;
@@ -38,7 +37,7 @@ struct Commit {
     files: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 struct Evidence {
     hash: String,
     date: String,
@@ -122,42 +121,37 @@ struct GraphBuildConfig {
     evidence_limit: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 struct ResultItem {
     path: String,
     score: f64,
     cochanges: usize,
     weight: f64,
-    #[serde(skip_serializing_if = "String::is_empty")]
     last_seen: String,
     reason: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     evidence: Vec<Evidence>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 struct QueryOutput {
     target: String,
     mode: String,
     related: Vec<ResultItem>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     hints: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 struct ExplainOutput {
     a: String,
     b: String,
     related: bool,
     cochanges: usize,
     weight: f64,
-    #[serde(skip_serializing_if = "String::is_empty")]
     last_seen: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     evidence: Vec<Evidence>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 struct EvalReport {
     repo_root: String,
     train_commits: usize,
@@ -171,7 +165,7 @@ struct EvalReport {
     metrics: Vec<EvalMetrics>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 struct EvalMetrics {
     mode: String,
     tasks: usize,
@@ -289,21 +283,15 @@ fn print_usage<W: Write>(out: &mut W) -> AnyResult<()> {
         r#"related: content-blind related-file ranking from Git co-change history
 
 Usage:
-  related query <file> [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS] [--json]
+  related query <file> [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS]
   related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
-  related explain <file-a> <file-b> [--max-commits N] [--json]
+  related explain <file-a> <file-b> [--max-commits N]
   related diff [--staged] [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS] [--max-commits N]
   related eval [--repo PATH] [--test-commits N] [--train-commits N]
 
 The graph is built on demand from files that changed together in Git commits.
 No source parsing, imports, embeddings, or file contents are used."#
     )?;
-    Ok(())
-}
-
-fn write_json<T: Serialize + ?Sized, W: Write>(out: &mut W, value: &T) -> AnyResult<()> {
-    serde_json::to_writer_pretty(&mut *out, value)?;
-    writeln!(out)?;
     Ok(())
 }
 
@@ -324,7 +312,7 @@ fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "scan-commits",
             "exclude",
         ],
-        &["json", "on-demand"],
+        &["on-demand"],
     )?;
     if parsed.positionals.len() != 1 {
         return Err("query requires exactly one file".into());
@@ -336,7 +324,6 @@ fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<
     let repo = flag_string(parsed, "repo", ".");
     let mode = flag_string(parsed, "mode", "direct");
     let top = flag_usize(parsed, "top", DEFAULT_TOP)?;
-    let json_out = flag_bool(parsed, "json");
     let exclude_patterns = parse_exclude_patterns(parsed);
     let config = parse_on_demand_config(parsed, 0)?;
 
@@ -352,11 +339,7 @@ fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<
         related,
         hints,
     };
-    if json_out {
-        write_json(out, &output)?;
-    } else {
-        print_query(out, &output)?;
-    }
+    print_query(out, &output)?;
     Ok(())
 }
 
@@ -537,14 +520,13 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "jobs",
             "scan-commits",
         ],
-        &["json"],
+        &[],
     )?;
     if parsed.positionals.len() != 2 {
         return Err("explain requires exactly two files".into());
     }
 
     let repo = flag_string(&parsed, "repo", ".");
-    let json_out = flag_bool(&parsed, "json");
     let config = parse_on_demand_config(&parsed, DEFAULT_EVIDENCE)?;
     let root = git_root(&repo)?;
     let output = explain_relationship(
@@ -553,11 +535,6 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         &parsed.positionals[1],
         &config,
     )?;
-
-    if json_out {
-        write_json(out, &output)?;
-        return Ok(());
-    }
 
     if !output.related {
         writeln!(
@@ -640,7 +617,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "scan-commits",
             "exclude",
         ],
-        &["staged", "json"],
+        &["staged"],
     )?;
     if !parsed.positionals.is_empty() {
         return Err("diff does not accept positional arguments".into());
@@ -650,7 +627,6 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let mode = flag_string(&parsed, "mode", "direct");
     let top = flag_usize(&parsed, "top", DEFAULT_TOP)?;
     let staged = flag_bool(&parsed, "staged");
-    let json_out = flag_bool(&parsed, "json");
     let exclude_patterns = parse_exclude_patterns(&parsed);
     let config = parse_on_demand_config(&parsed, 0)?;
 
@@ -684,11 +660,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         related,
         hints,
     };
-    if json_out {
-        write_json(out, &output)?;
-    } else {
-        print_query(out, &output)?;
-    }
+    print_query(out, &output)?;
     Ok(())
 }
 
@@ -704,7 +676,7 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "half-life-days",
             "modes",
         ],
-        &["json"],
+        &[],
     )?;
     if !parsed.positionals.is_empty() {
         return Err("eval does not accept positional arguments".into());
@@ -717,7 +689,6 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let max_files = flag_usize(&parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?;
     let half_life = flag_f64(&parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?;
     let modes = parse_modes(&flag_string(&parsed, "modes", "direct,pagerank,path,hot"));
-    let json_out = flag_bool(&parsed, "json");
     if test_commits == 0 || train_commits == 0 {
         return Err("test-commits and train-commits must be positive".into());
     }
@@ -751,11 +722,7 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     report.top_k = top;
     report.max_files_per_commit = max_files;
 
-    if json_out {
-        write_json(out, &report)?;
-    } else {
-        print_eval(out, &report)?;
-    }
+    print_eval(out, &report)?;
     Ok(())
 }
 
@@ -4697,10 +4664,29 @@ fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
         if item.cochanges == 0 || item.reason != "direct_cochange" {
             write!(out, " s={:.3}", item.score)?;
         }
+        if !item.evidence.is_empty() {
+            if !item.last_seen.is_empty() {
+                write!(out, " seen={}", item.last_seen)?;
+            }
+            if item.weight > 0.0 {
+                write!(out, " w={:.3}", item.weight)?;
+            }
+        }
         if let Some(reason) = compact_reason(&item.reason) {
             write!(out, " via={reason}")?;
         }
         writeln!(out)?;
+        for ev in &item.evidence {
+            writeln!(
+                out,
+                "  - {} {} files={} weight={:.6} {}",
+                short_hash(&ev.hash),
+                ev.date,
+                ev.file_count,
+                ev.weight,
+                ev.subject
+            )?;
+        }
     }
     for hint in &output.hints {
         writeln!(out, "hint: {hint}")?;
@@ -4767,10 +4753,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-    fn parse_json_output(output: &[u8]) -> serde_json::Value {
-        serde_json::from_slice(output).unwrap()
-    }
 
     #[test]
     fn git_tree_name_comparator_matches_directory_sort_rule() {
@@ -4956,18 +4938,31 @@ mod tests {
                 "20".to_string(),
                 "--mode".to_string(),
                 "direct".to_string(),
-                "--json".to_string(),
             ],
             &mut output,
         )
         .unwrap();
-        let json = parse_json_output(&output);
-        assert_eq!(json["target"].as_str(), Some("a.md"));
-        assert_eq!(json["mode"].as_str(), Some("direct:on-demand:GitCli"));
-        assert_eq!(json["related"][0]["path"].as_str(), Some("b.md"));
-        assert_eq!(json["related"][0]["cochanges"].as_u64(), Some(2));
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("related a.md direct:on-demand:GitCli\n"));
+        assert!(text.contains("1 b.md co=2\n"));
 
         fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn cli_rejects_json_flag() {
+        let mut output = Vec::new();
+        let err = run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--json".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown flag --json"));
     }
 
     #[test]
@@ -5044,28 +5039,22 @@ mod tests {
                 "20".to_string(),
                 "--exclude".to_string(),
                 BROAD_CHANGE_EXCLUDE_SUGGESTION.to_string(),
-                "--json".to_string(),
             ],
             &mut output,
         )
         .unwrap();
-        let json = parse_json_output(&output);
-        let related = json["related"].as_array().unwrap();
-        assert!(related.iter().any(|item| item["path"] == "b.md"));
-        assert!(!related.iter().any(|item| item["path"] == "Cargo.lock"));
-        assert!(
-            !related
-                .iter()
-                .any(|item| item["path"] == "package-lock.json")
-        );
-        assert!(!related.iter().any(|item| item["path"] == "pnpm-lock.yaml"));
-        assert!(!related.iter().any(|item| item["path"] == "bun.lockb"));
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("1 b.md co=2"));
+        assert!(!text.contains("Cargo.lock"));
+        assert!(!text.contains("package-lock.json"));
+        assert!(!text.contains("pnpm-lock.yaml"));
+        assert!(!text.contains("bun.lockb"));
 
         fs::remove_dir_all(repo).ok();
     }
 
     #[test]
-    fn cli_explain_supports_json_and_unrelated_files() {
+    fn cli_explain_supports_text_and_unrelated_files() {
         let repo = new_test_repo();
         write_commit(&repo, "pair", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
         write_commit(&repo, "other pair", &[("c.md", "c1\n"), ("d.md", "d1\n")]);
@@ -5111,18 +5100,16 @@ mod tests {
                 repo.display().to_string(),
                 "--history-backend".to_string(),
                 "git".to_string(),
-                "--json".to_string(),
             ],
             &mut output,
         )
         .unwrap();
-        let json = parse_json_output(&output);
-        assert_eq!(json["a"].as_str(), Some("a.md"));
-        assert_eq!(json["b"].as_str(), Some("b.md"));
-        assert_eq!(json["related"].as_bool(), Some(true));
-        assert_eq!(json["cochanges"].as_u64(), Some(1));
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("a.md <-> b.md"));
+        assert!(text.contains("cochanged=1"));
+        assert!(text.contains("files=2"));
 
-        output.clear();
+        let mut output = Vec::new();
         run_with_writer(
             vec![
                 "explain".to_string(),
@@ -5132,16 +5119,12 @@ mod tests {
                 repo.display().to_string(),
                 "--history-backend".to_string(),
                 "git".to_string(),
-                "--json".to_string(),
             ],
             &mut output,
         )
         .unwrap();
-        let json = parse_json_output(&output);
-        assert_eq!(json["a"].as_str(), Some("a.md"));
-        assert_eq!(json["b"].as_str(), Some("c.md"));
-        assert_eq!(json["related"].as_bool(), Some(false));
-        assert_eq!(json["cochanges"].as_u64(), Some(0));
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("a.md and c.md have no direct co-change evidence"));
 
         fs::remove_dir_all(repo).ok();
     }

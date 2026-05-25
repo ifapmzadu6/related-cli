@@ -58,17 +58,6 @@ target/release/related query \
   --mode direct \
   --top 10 > /tmp/related-token-related-text.txt
 
-target/release/related query \
-  src/vs/platform/sandbox/common/terminalSandboxEngine.ts \
-  --repo /tmp/related-vscode \
-  --since 2026-05-08T14:03:23-07:00 \
-  --mode direct \
-  --top 10 \
-  --json > /tmp/related-token-related.json
-
-jq -r '.related[].path' \
-  /tmp/related-token-related.json > /tmp/related-token-related-paths.txt
-
 (
   cd /tmp/related-vscode
   /tmp/related-external/node_modules/.bin/codegraph co-change \
@@ -97,8 +86,6 @@ jq -r '.related[].path' \
 | artifact | bytes | tokens |
 |---|---:|---:|
 | `related query` compact text output, top 10 | `893` | `231` |
-| `related query --json`, top 10 | `2,924` | `980` |
-| paths extracted from `related --json` | `732` | `170` |
 | `codegraph co-change` text output, top 10 | `1,162` | `331` |
 | `codegraph co-change --json`, top 10 | `2,433` | `797` |
 | `codegraph brief --json` for the target file | `17,328` | `4,328` |
@@ -120,8 +107,6 @@ Interpretation:
   about `61.4x` smaller than opening the target plus the top companion test, and
   about `199.4x` smaller than opening the target plus all top-10 companion
   files.
-- If an agent only needs file names, paths extracted from `related --json` were
-  `170` tokens in this run.
 
 ### With related-cli vs Without related-cli
 
@@ -180,22 +165,21 @@ same text-token comparison on five recent VS Code code files plus one manifest.
 All commands used the same checkout, target history window, `--top 10`, and
 `tiktoken` `cl100k_base`.
 
-| target | `related` text tokens | Codegraph text tokens | delta | `related` JSON tokens | Codegraph JSON tokens | same top result | top-10 overlap |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| `package.json` | `164` | no data | n/a | `917` | no data | n/a | n/a |
-| `extensions/copilot/src/extension/conversation/vscode-node/languageModelAccess.ts` | `215` | `298` | `-83` | `963` | `776` | yes | `7/10` |
-| `src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts` | `247` | `358` | `-111` | `994` | `831` | no | `5/10` |
-| `src/vs/platform/agentHost/node/copilot/copilotAgent.ts` | `224` | `309` | `-85` | `972` | `777` | yes | `8/10` |
-| `src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts` | `255` | `357` | `-102` | `1,003` | `835` | yes | `5/10` |
-| `src/vs/platform/sandbox/common/terminalSandboxEngine.ts` | `231` | `331` | `-100` | `980` | `797` | yes | `9/10` |
+| target | `related` text tokens | Codegraph text tokens | delta | Codegraph JSON tokens | same top result | top-10 overlap |
+|---|---:|---:|---:|---:|---:|---:|
+| `package.json` | `164` | no data | n/a | no data | n/a | n/a |
+| `extensions/copilot/src/extension/conversation/vscode-node/languageModelAccess.ts` | `215` | `298` | `-83` | `776` | yes | `7/10` |
+| `src/vs/workbench/contrib/chat/browser/widget/input/chatInputPart.ts` | `247` | `358` | `-111` | `831` | no | `5/10` |
+| `src/vs/platform/agentHost/node/copilot/copilotAgent.ts` | `224` | `309` | `-85` | `777` | yes | `8/10` |
+| `src/vs/workbench/contrib/terminalContrib/chatAgentTools/browser/tools/runInTerminalTool.ts` | `255` | `357` | `-102` | `835` | yes | `5/10` |
+| `src/vs/platform/sandbox/common/terminalSandboxEngine.ts` | `231` | `331` | `-100` | `797` | yes | `9/10` |
 
 Findings:
 
 - On the five code files, `related` compact text was smaller in every row.
   Median text tokens were `231` for `related` and `331` for Codegraph.
-- JSON is not the token-optimal human/agent display format here: Codegraph JSON
-  was smaller on all five code files. That is why the skill now defaults to
-  compact text and reserves `--json` for structured tool integration.
+- Compact text is the token-optimal human/agent display format here: it was
+  smaller than Codegraph text and Codegraph JSON on all five code files.
 - Top result matched on four of five code targets. The one mismatch,
   `chatInputPart.ts`, reflects different ranking semantics: `related` weighs
   recency, commit size, and pair strength, while Codegraph sorts this output by
