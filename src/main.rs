@@ -1,4 +1,21 @@
+mod cli;
+mod filters;
+mod git_utils;
+mod output;
+mod path_utils;
+
+use cli::{
+    ParsedArgs, flag_bool, flag_f64, flag_optional_string, flag_string, flag_usize, parse_args,
+    parse_modes,
+};
+use filters::{filter_related_results, filtered_query_top, parse_exclude_patterns, query_hints};
+use git_utils::{git_diff_names, git_path_is_tracked, run_git, run_git_with_stdin};
 use gix::bstr::ByteSlice;
+use output::{print_eval, print_query, short_hash};
+use path_utils::{
+    literal_pathspec, normalize_git_path, normalize_input_path, ordered_pair, pair_key,
+    path_basename, path_similarity, path_tokens,
+};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cmp::Ordering;
@@ -8,7 +25,6 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -200,12 +216,6 @@ enum GraphPathMatch<'a> {
     Known(String),
     Missing(String),
     Ambiguous(Vec<&'a str>),
-}
-
-#[derive(Default)]
-struct ParsedArgs {
-    flags: HashMap<String, Option<String>>,
-    positionals: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -724,209 +734,6 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
 
     print_eval(out, &report)?;
     Ok(())
-}
-
-fn parse_args(args: &[String], value_flags: &[&str], bool_flags: &[&str]) -> AnyResult<ParsedArgs> {
-    let value_flags: HashSet<&str> = value_flags.iter().copied().collect();
-    let bool_flags: HashSet<&str> = bool_flags.iter().copied().collect();
-    let mut parsed = ParsedArgs::default();
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--" {
-            parsed.positionals.extend(args[i + 1..].iter().cloned());
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            parsed.positionals.push(arg.clone());
-            i += 1;
-            continue;
-        }
-
-        let raw = arg.trim_start_matches('-');
-        let (name, inline_value) = raw
-            .split_once('=')
-            .map_or((raw, None), |(name, value)| (name, Some(value.to_string())));
-        if value_flags.contains(name) {
-            let value = if let Some(value) = inline_value {
-                value
-            } else {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return Err(format!("flag needs an argument: --{name}").into());
-                };
-                value.clone()
-            };
-            parsed.flags.insert(name.to_string(), Some(value));
-        } else if bool_flags.contains(name) {
-            if inline_value.is_some() {
-                return Err(format!("boolean flag --{name} does not take a value").into());
-            }
-            parsed.flags.insert(name.to_string(), None);
-        } else {
-            return Err(format!("unknown flag --{name}").into());
-        }
-        i += 1;
-    }
-    Ok(parsed)
-}
-
-fn flag_optional_string(parsed: &ParsedArgs, name: &str) -> Option<String> {
-    parsed.flags.get(name).and_then(Clone::clone)
-}
-
-fn flag_string(parsed: &ParsedArgs, name: &str, default: &str) -> String {
-    flag_optional_string(parsed, name).unwrap_or_else(|| default.to_string())
-}
-
-fn flag_bool(parsed: &ParsedArgs, name: &str) -> bool {
-    parsed.flags.contains_key(name)
-}
-
-fn flag_usize(parsed: &ParsedArgs, name: &str, default: usize) -> AnyResult<usize> {
-    let Some(value) = flag_optional_string(parsed, name) else {
-        return Ok(default);
-    };
-    value
-        .parse()
-        .map_err(|err| format!("invalid --{name} value {value:?}: {err}").into())
-}
-
-fn flag_f64(parsed: &ParsedArgs, name: &str, default: f64) -> AnyResult<f64> {
-    let Some(value) = flag_optional_string(parsed, name) else {
-        return Ok(default);
-    };
-    value
-        .parse()
-        .map_err(|err| format!("invalid --{name} value {value:?}: {err}").into())
-}
-
-fn parse_exclude_patterns(parsed: &ParsedArgs) -> Vec<String> {
-    let Some(value) = flag_optional_string(parsed, "exclude") else {
-        return Vec::new();
-    };
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|pattern| !pattern.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn filtered_query_top(top: usize, exclude_patterns: &[String]) -> usize {
-    if exclude_patterns.is_empty() {
-        top
-    } else {
-        top.saturating_mul(4).max(top.saturating_add(20))
-    }
-}
-
-fn filter_related_results(results: &mut Vec<ResultItem>, exclude_patterns: &[String], top: usize) {
-    if !exclude_patterns.is_empty() {
-        results.retain(|item| !path_matches_any_pattern(&item.path, exclude_patterns));
-    }
-    truncate_top_results(results, top);
-}
-
-fn query_hints(results: &[ResultItem], exclude_patterns: &[String]) -> Vec<String> {
-    let mut hints = Vec::new();
-    let window = results.len().min(8);
-    if window == 0 {
-        return hints;
-    }
-    let broad_change_results = results
-        .iter()
-        .take(window)
-        .filter(|item| looks_like_broad_change_path(&item.path))
-        .count();
-    if broad_change_results >= 4 && broad_change_results * 2 >= window {
-        if exclude_patterns.is_empty() {
-            hints.push(
-                format!(
-                    "Top results include several lockfile, manifest, workflow, or release-doc paths. Retry with --max-files-per-commit 10 --exclude '{BROAD_CHANGE_EXCLUDE_SUGGESTION}' --evidence 3 before opening many files."
-                ),
-            );
-        } else {
-            hints.push(
-                "Top results still look broad-change heavy. Inspect --evidence 3 or lower --max-files-per-commit further."
-                    .to_string(),
-            );
-        }
-    }
-    hints
-}
-
-fn path_matches_any_pattern(path: &str, patterns: &[String]) -> bool {
-    patterns
-        .iter()
-        .any(|pattern| path_matches_pattern(path, pattern))
-}
-
-fn path_matches_pattern(path: &str, pattern: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    if pattern.contains('*') {
-        return wildcard_match(pattern, path) || wildcard_match(pattern, path_basename(path));
-    }
-    path == pattern || path.ends_with(&format!("/{pattern}")) || path_basename(path) == pattern
-}
-
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    if !pattern.contains('*') {
-        return pattern == text;
-    }
-    let parts: Vec<&str> = pattern.split('*').collect();
-    let anchored_start = !pattern.starts_with('*');
-    let anchored_end = !pattern.ends_with('*');
-    let mut offset = 0usize;
-
-    for (idx, part) in parts.iter().enumerate() {
-        if part.is_empty() {
-            continue;
-        }
-        if idx == 0 && anchored_start {
-            let Some(rest) = text.get(offset..) else {
-                return false;
-            };
-            if !rest.starts_with(part) {
-                return false;
-            }
-            offset += part.len();
-            continue;
-        }
-        let Some(rest) = text.get(offset..) else {
-            return false;
-        };
-        let Some(found) = rest.find(part) else {
-            return false;
-        };
-        offset += found + part.len();
-    }
-
-    if anchored_end && let Some(last) = parts.iter().rev().find(|part| !part.is_empty()) {
-        return text.ends_with(last);
-    }
-    true
-}
-
-fn looks_like_broad_change_path(path: &str) -> bool {
-    let basename = path_basename(path);
-    matches!(
-        basename,
-        "Cargo.lock"
-            | "Cargo.toml"
-            | "package-lock.json"
-            | "package.json"
-            | "pnpm-lock.yaml"
-            | "yarn.lock"
-            | "bun.lockb"
-            | "poetry.lock"
-            | "uv.lock"
-            | "README.md"
-            | "CHANGELOG.md"
-            | "rust-toolchain.toml"
-    ) || path.starts_with(".github/workflows/")
 }
 
 fn default_jobs() -> usize {
@@ -4361,217 +4168,12 @@ fn pack_direct_pair_result(
     }
 }
 
-fn parse_modes(input: &str) -> Vec<String> {
-    let mut seen = HashSet::default();
-    let mut modes = Vec::new();
-    for raw in input.split(',') {
-        let mode = raw.trim();
-        if mode.is_empty() || !seen.insert(mode.to_string()) {
-            continue;
-        }
-        modes.push(mode.to_string());
-    }
-    if modes.is_empty() {
-        vec![
-            "direct".to_string(),
-            "pagerank".to_string(),
-            "path".to_string(),
-            "hot".to_string(),
-        ]
-    } else {
-        modes
-    }
-}
-
-fn run_git(repo: impl AsRef<Path>, args: &[&str]) -> AnyResult<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo.as_ref())
-        .args(args)
-        .output()?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!(
-            "git -C {} {} failed: {}\n{}{}",
-            repo.as_ref().display(),
-            args.join(" "),
-            output.status,
-            stdout.trim(),
-            stderr.trim()
-        )
-        .into())
-    }
-}
-
-fn run_git_with_stdin(repo: impl AsRef<Path>, args: &[&str], input: &[u8]) -> AnyResult<Vec<u8>> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(repo.as_ref())
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("failed to open git stdin")?
-        .write_all(input)?;
-    let output = child.wait_with_output()?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!(
-            "git -C {} {} failed: {}\n{}{}",
-            repo.as_ref().display(),
-            args.join(" "),
-            output.status,
-            stdout.trim(),
-            stderr.trim()
-        )
-        .into())
-    }
-}
-
-fn git_path_is_tracked(repo: &str, path: &str) -> AnyResult<bool> {
-    if path.is_empty() {
-        return Ok(false);
-    }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(literal_pathspec(path))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    Ok(output.success())
-}
-
-fn git_diff_names(repo: &str, staged: bool) -> AnyResult<Vec<String>> {
-    let args = if staged {
-        vec!["diff", "--name-only", "--cached"]
-    } else {
-        vec!["diff", "--name-only"]
-    };
-    let out = run_git(repo, &args)?;
-    Ok(String::from_utf8(out)?
-        .lines()
-        .map(normalize_git_path)
-        .filter(|path| !path.is_empty())
-        .collect())
-}
-
 fn time_decay(latest: i64, when: i64, half_life_days: f64) -> f64 {
     if half_life_days <= 0.0 {
         return 1.0;
     }
     let age_days = ((latest - when).max(0) as f64) / 86_400.0;
     (-std::f64::consts::LN_2 * age_days / half_life_days).exp()
-}
-
-fn normalize_git_path(path: &str) -> String {
-    let mut path = path.trim().replace('\\', "/");
-    while path.starts_with("./") {
-        path = path[2..].to_string();
-    }
-    let parts: Vec<&str> = path
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect();
-    let normalized = parts.join("/");
-    if normalized == "." {
-        String::new()
-    } else {
-        normalized
-    }
-}
-
-fn normalize_input_path(repo_root: &str, input: &str) -> String {
-    let input = input.trim();
-    let path = Path::new(input);
-    if path.is_absolute()
-        && let Ok(rel) = path.strip_prefix(repo_root)
-    {
-        return normalize_git_path(&rel.display().to_string());
-    }
-    normalize_git_path(input)
-}
-
-fn ordered_pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
-    if a <= b { (a, b) } else { (b, a) }
-}
-
-fn pair_key(a: &str, b: &str) -> String {
-    let (left, right) = ordered_pair(a, b);
-    format!("{left}\0{right}")
-}
-
-fn literal_pathspec(path: &str) -> String {
-    format!(":(literal){path}")
-}
-
-fn path_basename(path: &str) -> &str {
-    path.rsplit('/').next().unwrap_or(path)
-}
-
-fn path_dir(path: &str) -> &str {
-    path.rsplit_once('/').map_or(".", |(dir, _)| dir)
-}
-
-fn path_ext(path: &str) -> Option<&str> {
-    let basename = path_basename(path);
-    basename
-        .rsplit_once('.')
-        .map(|(_, ext)| ext)
-        .filter(|ext| !ext.is_empty())
-}
-
-fn path_tokens(path: &str) -> HashMap<String, f64> {
-    let lower = path.to_lowercase();
-    let mut tokens = HashMap::default();
-    for part in lower.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-        if part.len() >= 2 {
-            *tokens.entry(part.to_string()).or_default() += 1.0;
-        }
-    }
-    let dir = path_dir(&lower);
-    if dir != "." {
-        *tokens.entry(format!("dir:{dir}")).or_default() += 3.0;
-    }
-    if let Some(ext) = path_ext(&lower) {
-        *tokens.entry(format!("ext:{ext}")).or_default() += 0.5;
-    }
-    tokens
-}
-
-fn path_similarity(a: &str, b: &str, a_tokens: &HashMap<String, f64>) -> f64 {
-    let b_tokens = path_tokens(b);
-    let mut dot = 0.0;
-    let mut a_norm = 0.0;
-    let mut b_norm = 0.0;
-    for (token, value) in a_tokens {
-        a_norm += value * value;
-        if let Some(other) = b_tokens.get(token) {
-            dot += value * other;
-        }
-    }
-    for value in b_tokens.values() {
-        b_norm += value * value;
-    }
-    if a_norm == 0.0 || b_norm == 0.0 {
-        return 0.0;
-    }
-    let mut score = dot / (a_norm * b_norm).sqrt();
-    if path_dir(a) == path_dir(b) {
-        score += 0.25;
-    }
-    score
 }
 
 fn sort_results(results: &mut [ResultItem]) {
@@ -4650,106 +4252,11 @@ fn pack_direct_scored_pair_cmp(
         .then(left.path.cmp(&right.path))
 }
 
-fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
-    writeln!(out, "related {} {}", output.target, output.mode)?;
-    if output.related.is_empty() {
-        writeln!(out, "no related files found")?;
-        return Ok(());
-    }
-    for (idx, item) in output.related.iter().enumerate() {
-        write!(out, "{} {}", idx + 1, item.path)?;
-        if item.cochanges > 0 {
-            write!(out, " co={}", item.cochanges)?;
-        }
-        if item.cochanges == 0 || item.reason != "direct_cochange" {
-            write!(out, " s={:.3}", item.score)?;
-        }
-        if !item.evidence.is_empty() {
-            if !item.last_seen.is_empty() {
-                write!(out, " seen={}", item.last_seen)?;
-            }
-            if item.weight > 0.0 {
-                write!(out, " w={:.3}", item.weight)?;
-            }
-        }
-        if let Some(reason) = compact_reason(&item.reason) {
-            write!(out, " via={reason}")?;
-        }
-        writeln!(out)?;
-        for ev in &item.evidence {
-            writeln!(
-                out,
-                "  - {} {} files={} weight={:.6} {}",
-                short_hash(&ev.hash),
-                ev.date,
-                ev.file_count,
-                ev.weight,
-                ev.subject
-            )?;
-        }
-    }
-    for hint in &output.hints {
-        writeln!(out, "hint: {hint}")?;
-    }
-    Ok(())
-}
-
-fn compact_reason(reason: &str) -> Option<&str> {
-    match reason {
-        "direct_cochange" => None,
-        "pagerank_direct_evidence" => Some("ppr-direct"),
-        "pagerank_via_cochange_graph" => Some("ppr"),
-        "path_name_baseline" => Some("path"),
-        "hot_file_baseline" => Some("hot"),
-        other => Some(other),
-    }
-}
-
-fn print_eval<W: Write>(out: &mut W, report: &EvalReport) -> io::Result<()> {
-    writeln!(out, "repo: {}", report.repo_root)?;
-    writeln!(
-        out,
-        "train_commits={} test_commits={} top_k={} max_files_per_commit={}",
-        report.train_commits, report.test_commits, report.top_k, report.max_files_per_commit
-    )?;
-    writeln!(
-        out,
-        "candidate_tasks={} evaluated_tasks={} skipped_unknown_seed={} skipped_no_known_target={}",
-        report.candidate_tasks,
-        report.evaluated_tasks,
-        report.skipped_unknown_seed,
-        report.skipped_no_known_target
-    )?;
-    writeln!(out)?;
-    writeln!(
-        out,
-        "{:<10} {:>8} {:>10} {:>12} {:>10} {:>10} {:>11}",
-        "mode", "tasks", "hit@k", "precision@k", "recall@k", "mrr", "avg_results"
-    )?;
-    for metric in &report.metrics {
-        writeln!(
-            out,
-            "{:<10} {:>8} {:>10.4} {:>12.4} {:>10.4} {:>10.4} {:>11.2}",
-            metric.mode,
-            metric.tasks,
-            metric.hit_rate_at_k,
-            metric.precision_at_k,
-            metric.recall_at_k,
-            metric.mrr,
-            metric.avg_results
-        )?;
-    }
-    Ok(())
-}
-
-fn short_hash(hash: &str) -> &str {
-    hash.get(..12).unwrap_or(hash)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
