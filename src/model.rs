@@ -1,0 +1,213 @@
+use rustc_hash::FxHashMap as HashMap;
+
+#[derive(Clone, Debug)]
+pub(crate) struct Commit {
+    pub(crate) hash: String,
+    pub(crate) unix_time: i64,
+    pub(crate) date: String,
+    pub(crate) subject: String,
+    pub(crate) files: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Evidence {
+    pub(crate) hash: String,
+    pub(crate) date: String,
+    pub(crate) subject: String,
+    pub(crate) file_count: usize,
+    pub(crate) weight: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FileStat {
+    pub(crate) changes: usize,
+    pub(crate) weighted_changes: f64,
+    pub(crate) last_seen: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PairStat {
+    pub(crate) a: String,
+    pub(crate) b: String,
+    pub(crate) cochanges: usize,
+    pub(crate) weight: f64,
+    pub(crate) last_seen: String,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DirectPairStat<'a> {
+    pub(crate) cochanges: usize,
+    pub(crate) weight: f64,
+    pub(crate) other_weight: f64,
+    pub(crate) last_seen: &'a str,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
+pub(crate) struct DirectScoredPair<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) pair: DirectPairStat<'a>,
+    pub(crate) score: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PackDirectPairStat {
+    pub(crate) cochanges: usize,
+    pub(crate) weight: f64,
+    pub(crate) other_weight: f64,
+    pub(crate) last_seen_time: Option<i64>,
+    pub(crate) last_seen_offset: i32,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
+pub(crate) struct PackDirectScoredPair {
+    pub(crate) path: String,
+    pub(crate) pair: PackDirectPairStat,
+    pub(crate) score: f64,
+}
+
+pub(crate) struct PackDirectPartial {
+    pub(crate) target_weight: f64,
+    pub(crate) pairs: HashMap<String, PackDirectPairStat>,
+}
+
+impl PackDirectPartial {
+    pub(crate) fn new(top: usize) -> Self {
+        Self {
+            target_weight: 0.0,
+            pairs: HashMap::with_capacity_and_hasher(direct_pair_capacity(top), Default::default()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GraphData {
+    pub(crate) files: HashMap<String, FileStat>,
+    pub(crate) pairs: Vec<PairStat>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GraphBuildConfig {
+    pub(crate) max_files_per_commit: usize,
+    pub(crate) half_life_days: f64,
+    pub(crate) evidence_limit: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResultItem {
+    pub(crate) path: String,
+    pub(crate) score: f64,
+    pub(crate) cochanges: usize,
+    pub(crate) weight: f64,
+    pub(crate) last_seen: String,
+    pub(crate) reason: String,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct QueryOutput {
+    pub(crate) target: String,
+    pub(crate) mode: String,
+    pub(crate) related: Vec<ResultItem>,
+    pub(crate) hints: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExplainOutput {
+    pub(crate) a: String,
+    pub(crate) b: String,
+    pub(crate) related: bool,
+    pub(crate) cochanges: usize,
+    pub(crate) weight: f64,
+    pub(crate) last_seen: String,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EvalReport {
+    pub(crate) repo_root: String,
+    pub(crate) train_commits: usize,
+    pub(crate) test_commits: usize,
+    pub(crate) top_k: usize,
+    pub(crate) max_files_per_commit: usize,
+    pub(crate) candidate_tasks: usize,
+    pub(crate) evaluated_tasks: usize,
+    pub(crate) skipped_unknown_seed: usize,
+    pub(crate) skipped_no_known_target: usize,
+    pub(crate) metrics: Vec<EvalMetrics>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EvalMetrics {
+    pub(crate) mode: String,
+    pub(crate) tasks: usize,
+    pub(crate) hit_rate_at_k: f64,
+    pub(crate) precision_at_k: f64,
+    pub(crate) recall_at_k: f64,
+    pub(crate) mrr: f64,
+    pub(crate) avg_results: f64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EvalAccumulator {
+    pub(crate) mode: String,
+    pub(crate) tasks: usize,
+    pub(crate) hit_tasks: usize,
+    pub(crate) precision_sum: f64,
+    pub(crate) recall_sum: f64,
+    pub(crate) mrr_sum: f64,
+    pub(crate) results_sum: usize,
+}
+
+pub(crate) struct RelatedGraph<'a> {
+    pub(crate) data: &'a GraphData,
+    pub(crate) pairs: HashMap<String, PairStat>,
+    pub(crate) adj: HashMap<String, HashMap<String, f64>>,
+    pub(crate) degree: HashMap<String, f64>,
+    pub(crate) paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum GraphPathMatch<'a> {
+    Known(String),
+    Missing(String),
+    Ambiguous(Vec<&'a str>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OnDemandBackend {
+    Hybrid,
+    Gix,
+    GitCli,
+    GitBatch,
+    GitBatchParallel,
+    GitDiffTree,
+    GitDiffTreeParallel,
+    GitRevList,
+    GitRemoveEmpty,
+    PackScan,
+    PackFast,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GixCommitSeed {
+    pub(crate) id: gix::hash::ObjectId,
+    pub(crate) first_parent: Option<gix::hash::ObjectId>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OnDemandConfig {
+    pub(crate) backend: OnDemandBackend,
+    pub(crate) max_commits: usize,
+    pub(crate) since: Option<String>,
+    pub(crate) max_files_per_commit: usize,
+    pub(crate) half_life_days: f64,
+    pub(crate) evidence_limit: usize,
+    pub(crate) jobs: usize,
+    pub(crate) jobs_explicit: bool,
+    pub(crate) scan_commits: usize,
+}
+
+pub(crate) fn direct_pair_capacity(top: usize) -> usize {
+    top.saturating_mul(32).clamp(64, 4096)
+}

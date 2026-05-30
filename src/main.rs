@@ -1,6 +1,7 @@
 mod cli;
 mod filters;
 mod git_utils;
+mod model;
 mod output;
 mod path_utils;
 
@@ -11,6 +12,7 @@ use cli::{
 use filters::{filter_related_results, filtered_query_top, parse_exclude_patterns, query_hints};
 use git_utils::{git_diff_names, git_path_is_tracked, run_git, run_git_with_stdin};
 use gix::bstr::ByteSlice;
+use model::*;
 use output::{print_eval, print_query, short_hash};
 use path_utils::{
     literal_pathspec, normalize_git_path, normalize_input_path, ordered_pair, pair_key,
@@ -43,214 +45,6 @@ const BROAD_CHANGE_EXCLUDE_SUGGESTION: &str = "*.lock,*-lock.*,*lockb,.github/wo
 
 type AnyError = Box<dyn Error>;
 type AnyResult<T> = Result<T, AnyError>;
-
-#[derive(Clone, Debug)]
-struct Commit {
-    hash: String,
-    unix_time: i64,
-    date: String,
-    subject: String,
-    files: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct Evidence {
-    hash: String,
-    date: String,
-    subject: String,
-    file_count: usize,
-    weight: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct FileStat {
-    changes: usize,
-    weighted_changes: f64,
-    last_seen: String,
-}
-
-#[derive(Clone, Debug)]
-struct PairStat {
-    a: String,
-    b: String,
-    cochanges: usize,
-    weight: f64,
-    last_seen: String,
-    evidence: Vec<Evidence>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct DirectPairStat<'a> {
-    cochanges: usize,
-    weight: f64,
-    other_weight: f64,
-    last_seen: &'a str,
-    evidence: Vec<Evidence>,
-}
-
-struct DirectScoredPair<'a> {
-    path: &'a str,
-    pair: DirectPairStat<'a>,
-    score: f64,
-}
-
-#[derive(Clone, Debug, Default)]
-struct PackDirectPairStat {
-    cochanges: usize,
-    weight: f64,
-    other_weight: f64,
-    last_seen_time: Option<i64>,
-    last_seen_offset: i32,
-    evidence: Vec<Evidence>,
-}
-
-struct PackDirectScoredPair {
-    path: String,
-    pair: PackDirectPairStat,
-    score: f64,
-}
-
-struct PackDirectPartial {
-    target_weight: f64,
-    pairs: HashMap<String, PackDirectPairStat>,
-}
-
-impl PackDirectPartial {
-    fn new(top: usize) -> Self {
-        Self {
-            target_weight: 0.0,
-            pairs: HashMap::with_capacity_and_hasher(direct_pair_capacity(top), Default::default()),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct GraphData {
-    files: HashMap<String, FileStat>,
-    pairs: Vec<PairStat>,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct GraphBuildConfig {
-    max_files_per_commit: usize,
-    half_life_days: f64,
-    evidence_limit: usize,
-}
-
-#[derive(Clone, Debug)]
-struct ResultItem {
-    path: String,
-    score: f64,
-    cochanges: usize,
-    weight: f64,
-    last_seen: String,
-    reason: String,
-    evidence: Vec<Evidence>,
-}
-
-#[derive(Clone, Debug)]
-struct QueryOutput {
-    target: String,
-    mode: String,
-    related: Vec<ResultItem>,
-    hints: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ExplainOutput {
-    a: String,
-    b: String,
-    related: bool,
-    cochanges: usize,
-    weight: f64,
-    last_seen: String,
-    evidence: Vec<Evidence>,
-}
-
-#[derive(Clone, Debug)]
-struct EvalReport {
-    repo_root: String,
-    train_commits: usize,
-    test_commits: usize,
-    top_k: usize,
-    max_files_per_commit: usize,
-    candidate_tasks: usize,
-    evaluated_tasks: usize,
-    skipped_unknown_seed: usize,
-    skipped_no_known_target: usize,
-    metrics: Vec<EvalMetrics>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct EvalMetrics {
-    mode: String,
-    tasks: usize,
-    hit_rate_at_k: f64,
-    precision_at_k: f64,
-    recall_at_k: f64,
-    mrr: f64,
-    avg_results: f64,
-}
-
-#[derive(Clone, Debug)]
-struct EvalAccumulator {
-    mode: String,
-    tasks: usize,
-    hit_tasks: usize,
-    precision_sum: f64,
-    recall_sum: f64,
-    mrr_sum: f64,
-    results_sum: usize,
-}
-
-struct RelatedGraph<'a> {
-    data: &'a GraphData,
-    pairs: HashMap<String, PairStat>,
-    adj: HashMap<String, HashMap<String, f64>>,
-    degree: HashMap<String, f64>,
-    paths: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum GraphPathMatch<'a> {
-    Known(String),
-    Missing(String),
-    Ambiguous(Vec<&'a str>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OnDemandBackend {
-    Hybrid,
-    Gix,
-    GitCli,
-    GitBatch,
-    GitBatchParallel,
-    GitDiffTree,
-    GitDiffTreeParallel,
-    GitRevList,
-    GitRemoveEmpty,
-    PackScan,
-    PackFast,
-}
-
-#[derive(Clone, Debug)]
-struct GixCommitSeed {
-    id: gix::hash::ObjectId,
-    first_parent: Option<gix::hash::ObjectId>,
-}
-
-#[derive(Clone, Debug)]
-struct OnDemandConfig {
-    backend: OnDemandBackend,
-    max_commits: usize,
-    since: Option<String>,
-    max_files_per_commit: usize,
-    half_life_days: f64,
-    evidence_limit: usize,
-    jobs: usize,
-    jobs_explicit: bool,
-    scan_commits: usize,
-}
 
 fn main() {
     if let Err(err) = run(env::args().skip(1).collect()) {
@@ -4221,10 +4015,6 @@ fn result_cmp(left: &ResultItem, right: &ResultItem) -> Ordering {
         .score
         .total_cmp(&left.score)
         .then(left.path.cmp(&right.path))
-}
-
-fn direct_pair_capacity(top: usize) -> usize {
-    top.saturating_mul(32).clamp(64, 4096)
 }
 
 fn effective_max_files(config: &OnDemandConfig) -> usize {

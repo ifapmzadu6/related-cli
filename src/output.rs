@@ -1,4 +1,4 @@
-use crate::{EvalReport, QueryOutput};
+use crate::model::{EvalReport, QueryOutput};
 use std::io::{self, Write};
 
 pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
