@@ -59,7 +59,7 @@ npx -y --package related-cli@latest related-install-skill
 ```
 
 Run it from the target project root. It copies the skill to
-`.codex/skills/find-related-files` in the current project. Commit that directory
+`.agents/skills/find-related-files` in the current project. Commit that directory
 when you want the same pre-edit related-file workflow to travel with the
 repository.
 

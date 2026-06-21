@@ -18,16 +18,16 @@ check_installer() {
   mkdir -p "$project"
 
   (cd "$project" && "$@" >/dev/null)
-  test -f "$project/.codex/skills/find-related-files/SKILL.md"
+  test -f "$project/.agents/skills/find-related-files/SKILL.md"
 
   (cd "$project" && "$@" codex >/dev/null)
-  test -f "$project/.codex/skills/find-related-files/SKILL.md"
+  test -f "$project/.agents/skills/find-related-files/SKILL.md"
 
   (cd "$project" && "$@" claude >/dev/null)
   test -f "$project/.claude/skills/find-related-files/SKILL.md"
 
-  env CODEX_HOME="$tmp/$label-codex-home" "$@" --user >/dev/null
-  test -f "$tmp/$label-codex-home/skills/find-related-files/SKILL.md"
+  env HOME="$tmp/$label-codex-home" "$@" --user >/dev/null
+  test -f "$tmp/$label-codex-home/.agents/skills/find-related-files/SKILL.md"
 
   env HOME="$tmp/$label-home" "$@" claude --user >/dev/null
   test -f "$tmp/$label-home/.claude/skills/find-related-files/SKILL.md"

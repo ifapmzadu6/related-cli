@@ -19,7 +19,7 @@ project="$tmp/project"
 mkdir -p "$project"
 
 (cd "$project" && npm exec --yes --package "$tarball" related-install-skill >/dev/null)
-test -f "$project/.codex/skills/find-related-files/SKILL.md"
+test -f "$project/.agents/skills/find-related-files/SKILL.md"
 
 (cd "$project" && npm exec --yes --package "$tarball" related-install-skill claude >/dev/null)
 test -f "$project/.claude/skills/find-related-files/SKILL.md"
