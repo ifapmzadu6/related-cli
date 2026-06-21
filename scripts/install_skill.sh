@@ -44,10 +44,10 @@ done
 
 case "$agent:$scope" in
   codex:project)
-    dest="$PWD/.codex/skills/find-related-files"
+    dest="$PWD/.agents/skills/find-related-files"
     ;;
   codex:user)
-    dest="${CODEX_HOME:-$HOME/.codex}/skills/find-related-files"
+    dest="$HOME/.agents/skills/find-related-files"
     ;;
   claude:project)
     dest="$PWD/.claude/skills/find-related-files"

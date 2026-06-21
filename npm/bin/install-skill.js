@@ -77,11 +77,12 @@ function parseArgs(argv) {
 
 function destination({ agent, scope }) {
   if (agent === "codex" && scope === "project") {
-    return path.join(process.cwd(), ".codex", "skills", "find-related-files");
+    return path.join(process.cwd(), ".agents", "skills", "find-related-files");
   }
   if (agent === "codex" && scope === "user") {
     return path.join(
-      process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
+      os.homedir(),
+      ".agents",
       "skills",
       "find-related-files",
     );
