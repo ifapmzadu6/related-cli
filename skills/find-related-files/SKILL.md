@@ -56,7 +56,8 @@ env npm_config_loglevel=error npx -y --package related-cli@latest related query 
 - Use `--history-backend git` when exact Git history is more important than
   low latency.
 - Use the default `pack-fast` backend for a fast approximate pre-edit check in
-  large workspaces.
+  large workspaces. It automatically falls back to Git when the repository uses
+  an unsupported object format.
 
 ## Distribution Notes
 

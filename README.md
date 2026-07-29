@@ -102,15 +102,25 @@ npx -y --package related-cli@latest related query src/auth.ts --top 20
 npx -y --package related-cli@latest related diff --staged --top 20
 ```
 
-By default commands run against the current directory's Git repository. Use
-`--repo PATH` only when querying another checkout from outside that repository.
-No persistent index is created; the graph is built on demand from the target
-file's Git history.
+By default commands run against the current directory's Git repository. Relative
+file arguments are resolved from that directory, so querying from a repository
+subdirectory works as expected. When `--repo PATH` is supplied, relative file
+arguments are resolved from `PATH`. Query targets must be tracked by Git; a typo
+is reported as an error instead of being shown as an empty ranking. No persistent
+index is created; the graph is built on demand from the target file's Git
+history.
+
+UTF-8 file names, including non-ASCII names, are supported. Git paths that are
+not valid UTF-8 are rejected because the CLI's text protocol is UTF-8.
 
 The default backend, `pack-fast`, is optimized for low-latency agent calls in
 large repositories and may stop before an exact full history walk. Use
 `--history-backend git` when exact Git history is more important than speed, or
-`--history-backend pack-scan` for a deeper pack-only scan.
+`--history-backend pack-scan` for a deeper pack-only scan. The pack backends read
+SHA-1 object storage directly. On a repository using another Git object format,
+the default automatically falls back to `git`; an explicitly requested
+incompatible backend returns a clear error. The Git backend is path-exact but
+does not follow file renames.
 
 If the top results all look like broad release, dependency, formatting, or
 initial-commit churn, inspect evidence and retry with a tighter commit-size
@@ -125,6 +135,12 @@ The default text output is compact for LLM-tool use: it prints ranked paths plus
 short `co=` counts, and `query`/`diff` omit per-commit evidence by default. Add
 `--evidence N` when example commits would help, or use `explain file-a file-b`
 for one focused relationship.
+
+`related eval` defaults to `--query-shape on-demand`, which evaluates the same
+target-local graph shape used by `related query`. Use `--query-shape global` for
+the older research-style evaluator that builds one graph from the entire
+training window. Global results measure the potential of the history signal but
+should not be presented as production-query accuracy.
 
 ## Comparison
 
@@ -307,10 +323,12 @@ That is a `97.3%` to `99.5%` reduction in pre-read context when the alternative
 is opening source files to discover companion context. This is not a claim that
 every no-tool agent must read exactly those files; simple `rg` or `git log`
 probes can be small too, but they answer different questions and require the
-agent to guess the right lexical query. The holdout eval checks that the shorter
-history signal is still useful: on the same VS Code run, the default `direct`
-history ranking hit@10 was `71.9%`, versus `54.6%` for a path/name baseline and
-`28.3%` for a hot-file baseline; `pagerank` reached `78.7%`.
+agent to guess the right lexical query. A historical global-graph holdout
+evaluation checked that the shorter history signal contains useful predictive
+information: on the same VS Code run, `direct` hit@10 was `71.9%`, versus
+`54.6%` for a path/name baseline and `28.3%` for a hot-file baseline;
+`pagerank` reached `78.7%`. These are explicitly global evaluator numbers, not
+accuracy claims for the target-local production query.
 
 After compacting the default output, `related`'s text shortlist is also slightly
 smaller than Codegraph's text co-change table for this target, while still

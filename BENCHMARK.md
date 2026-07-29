@@ -22,6 +22,7 @@ Evaluation command:
 ```sh
 target/release/related eval \
   --repo /tmp/related-vscode \
+  --query-shape global \
   --test-commits 200 \
   --train-commits 1000 \
   --top 10 \
@@ -29,9 +30,15 @@ target/release/related eval \
 ```
 
 The newest 200 commits were held out as test data. The older 1000 commits were
-used to build an in-memory co-change graph for the evaluator. For each held-out
-commit, the evaluator gives the tool one known changed file and checks whether
-the other known files from that same commit appear in the top 10.
+used to build an in-memory global co-change graph for the evaluator. For each
+held-out commit, the evaluator gives the tool one known changed file and checks
+whether the other known files from that same commit appear in the top 10.
+
+This recorded run predates the target-local evaluator and is intentionally
+labelled `--query-shape global`. The CLI now defaults to `--query-shape
+on-demand`, which reconstructs the target-local graph shape used by `query`.
+Global results measure the signal's potential; they are not production-query
+accuracy numbers.
 
 The `path` mode is a content-blind path/name similarity baseline. It is not grep;
 grep requires a text query, while this evaluation starts from a file path.
@@ -39,6 +46,7 @@ grep requires a text query, while this evaluation starts from a file path.
 ## Results
 
 ```text
+query_shape=global train_commits=1000 test_commits=200 top_k=10 max_files_per_commit=80
 candidate_tasks=767 evaluated_tasks=544 skipped_unknown_seed=223 skipped_no_known_target=0
 
 mode          tasks      hit@k  precision@k   recall@k        mrr avg_results

@@ -1,24 +1,28 @@
 mod cli;
+mod evaluation;
 mod filters;
 mod git_utils;
 mod model;
 mod output;
 mod path_utils;
+mod repo;
 
 use cli::{
-    ParsedArgs, flag_bool, flag_f64, flag_optional_string, flag_string, flag_usize, parse_args,
-    parse_modes,
+    ParsedArgs, flag_bool, flag_optional_string, flag_positive_f64, flag_positive_usize,
+    flag_string, flag_usize, parse_args, parse_modes,
 };
+use evaluation::{evaluate_global, evaluate_on_demand};
 use filters::{filter_related_results, filtered_query_top, parse_exclude_patterns, query_hints};
 use git_utils::{git_diff_names, git_path_is_tracked, run_git, run_git_with_stdin};
 use gix::bstr::ByteSlice;
 use model::*;
-use output::{print_eval, print_query, short_hash};
+use output::{escape_text, print_eval, print_query, short_hash};
 use path_utils::{
-    literal_pathspec, normalize_git_path, normalize_input_path, ordered_pair, pair_key,
-    path_basename, path_similarity, path_tokens,
+    decode_git_path, literal_pathspec, normalize_git_path, normalize_input_path, ordered_pair,
+    pair_key, path_basename, path_similarity, path_tokens,
 };
 use rayon::prelude::*;
+use repo::RepoContext;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -91,10 +95,13 @@ Usage:
   related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
   related explain <file-a> <file-b> [--max-commits N]
   related diff [--staged] [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS] [--max-commits N]
-  related eval [--repo PATH] [--test-commits N] [--train-commits N]
+  related eval [--repo PATH] [--query-shape on-demand|global] [--test-commits N] [--train-commits N]
 
 The graph is built on demand from files that changed together in Git commits.
-No source parsing, imports, embeddings, or file contents are used."#
+No source parsing, imports, embeddings, or file contents are used.
+Relative file paths are resolved from --repo (or the current directory), and
+query targets must be tracked by Git. Eval defaults to the target-local
+on-demand query shape; use --query-shape global for the research graph."#
     )?;
     Ok(())
 }
@@ -127,16 +134,29 @@ fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
 fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<()> {
     let repo = flag_string(parsed, "repo", ".");
     let mode = flag_string(parsed, "mode", "direct");
-    let top = flag_usize(parsed, "top", DEFAULT_TOP)?;
+    validate_query_mode(&mode)?;
+    let top = flag_positive_usize(parsed, "top", DEFAULT_TOP)?;
     let exclude_patterns = parse_exclude_patterns(parsed);
-    let config = parse_on_demand_config(parsed, 0)?;
+    let mut config = parse_on_demand_config(parsed, 0)?;
 
-    let root = git_root(&repo)?;
-    let target = normalize_input_path(&root, &parsed.positionals[0]);
+    let repo = RepoContext::discover(&repo)?;
+    let root = repo.root_str()?;
+    let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
+    let target = normalize_input_path(&repo.root, &repo.input_base, &parsed.positionals[0])?;
+    if !git_path_is_tracked(root, &target)? {
+        return Err(format!(
+            "{:?} is not tracked in the repository",
+            parsed.positionals[0]
+        )
+        .into());
+    }
     let query_top = filtered_query_top(top, &exclude_patterns);
-    let mut related = query_on_demand(&root, &target, &mode, query_top, &config)?;
+    let mut related = query_on_demand(root, &target, &mode, query_top, &config)?;
     filter_related_results(&mut related, &exclude_patterns, top);
-    let hints = query_hints(&related, &exclude_patterns);
+    let mut hints = query_hints(&related, &exclude_patterns);
+    if let Some(hint) = backend_hint {
+        hints.insert(0, hint);
+    }
     let output = QueryOutput {
         target,
         mode: format!("{mode}:on-demand:{:?}", config.backend),
@@ -216,12 +236,17 @@ fn parse_on_demand_config(
             "history-backend",
             DEFAULT_ON_DEMAND_BACKEND,
         ))?,
+        backend_explicit: parsed.flags.contains_key("history-backend"),
         max_commits: flag_usize(parsed, "max-commits", DEFAULT_MAX_COMMITS)?,
         since: flag_optional_string(parsed, "since"),
-        max_files_per_commit: flag_usize(parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?,
-        half_life_days: flag_f64(parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?,
+        max_files_per_commit: flag_positive_usize(
+            parsed,
+            "max-files-per-commit",
+            DEFAULT_MAX_FILES,
+        )?,
+        half_life_days: flag_positive_f64(parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?,
         evidence_limit: flag_usize(parsed, "evidence", default_evidence)?,
-        jobs: flag_usize(parsed, "jobs", default_jobs())?.max(1),
+        jobs: flag_positive_usize(parsed, "jobs", default_jobs())?,
         jobs_explicit: parsed.flags.contains_key("jobs"),
         scan_commits: flag_usize(parsed, "scan-commits", 0)?,
     })
@@ -331,10 +356,13 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     }
 
     let repo = flag_string(&parsed, "repo", ".");
-    let config = parse_on_demand_config(&parsed, DEFAULT_EVIDENCE)?;
-    let root = git_root(&repo)?;
+    let mut config = parse_on_demand_config(&parsed, DEFAULT_EVIDENCE)?;
+    let repo = RepoContext::discover(&repo)?;
+    let root = repo.root_str()?;
+    let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
     let output = explain_relationship(
-        &root,
+        root,
+        &repo.input_base,
         &parsed.positionals[0],
         &parsed.positionals[1],
         &config,
@@ -344,12 +372,21 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         writeln!(
             out,
             "{} and {} have no direct co-change evidence in this history window.",
-            output.a, output.b
+            escape_text(&output.a),
+            escape_text(&output.b)
         )?;
+        if let Some(hint) = backend_hint {
+            writeln!(out, "hint: {hint}")?;
+        }
         return Ok(());
     }
 
-    writeln!(out, "{} <-> {}", output.a, output.b)?;
+    writeln!(
+        out,
+        "{} <-> {}",
+        escape_text(&output.a),
+        escape_text(&output.b)
+    )?;
     writeln!(
         out,
         "cochanged={} weight={:.6} last_seen={}",
@@ -363,23 +400,27 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             ev.date,
             ev.file_count,
             ev.weight,
-            ev.subject
+            escape_text(&ev.subject)
         )?;
+    }
+    if let Some(hint) = backend_hint {
+        writeln!(out, "hint: {hint}")?;
     }
     Ok(())
 }
 
 fn explain_relationship(
     root: &str,
+    input_base: &Path,
     a_input: &str,
     b_input: &str,
     config: &OnDemandConfig,
 ) -> AnyResult<ExplainOutput> {
-    let target = normalize_input_path(root, a_input);
+    let target = normalize_input_path(Path::new(root), input_base, a_input)?;
     let data = build_on_demand_graph_data(root, &target, config)?;
     let graph = RelatedGraph::new(&data);
-    let a = graph.resolve_path(root, &target)?;
-    let b = graph.resolve_path_or_tracked(root, b_input)?;
+    let a = graph.resolve_path(root, input_base, a_input)?;
+    let b = graph.resolve_path_or_tracked(root, input_base, b_input)?;
     let key = pair_key(&a, &b);
     let Some(pair) = graph.pairs.get(&key) else {
         return Ok(ExplainOutput {
@@ -429,13 +470,16 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
 
     let repo = flag_string(&parsed, "repo", ".");
     let mode = flag_string(&parsed, "mode", "direct");
-    let top = flag_usize(&parsed, "top", DEFAULT_TOP)?;
+    validate_query_mode(&mode)?;
+    let top = flag_positive_usize(&parsed, "top", DEFAULT_TOP)?;
     let staged = flag_bool(&parsed, "staged");
     let exclude_patterns = parse_exclude_patterns(&parsed);
-    let config = parse_on_demand_config(&parsed, 0)?;
+    let mut config = parse_on_demand_config(&parsed, 0)?;
 
-    let root = git_root(&repo)?;
-    let changed = git_diff_names(&root, staged)?;
+    let repo = RepoContext::discover(&repo)?;
+    let root = repo.root_str()?;
+    let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
+    let changed = git_diff_names(root, staged)?;
     if changed.is_empty() {
         return Err("no changed files found".into());
     }
@@ -443,21 +487,24 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let changed_set: HashSet<String> = changed.iter().cloned().collect();
     let mut aggregate: HashMap<String, ResultItem> = HashMap::default();
     let query_top = filtered_query_top(top, &exclude_patterns);
-    for target in &changed_set {
-        for mut result in query_on_demand(&root, target, &mode, query_top, &config)? {
+    for target in &changed {
+        for result in query_on_demand(root, target, &mode, query_top, &config)? {
             if changed_set.contains(&result.path) {
                 continue;
             }
-            if let Some(previous) = aggregate.remove(&result.path) {
-                result.score += previous.score;
-                result.cochanges = result.cochanges.max(previous.cochanges);
+            if let Some(previous) = aggregate.get_mut(&result.path) {
+                merge_diff_result(previous, result, config.evidence_limit);
+            } else {
+                aggregate.insert(result.path.clone(), result);
             }
-            aggregate.insert(result.path.clone(), result);
         }
     }
     let mut related: Vec<ResultItem> = aggregate.into_values().collect();
     filter_related_results(&mut related, &exclude_patterns, top);
-    let hints = query_hints(&related, &exclude_patterns);
+    let mut hints = query_hints(&related, &exclude_patterns);
+    if let Some(hint) = backend_hint {
+        hints.insert(0, hint);
+    }
     let output = QueryOutput {
         target: changed.join(","),
         mode,
@@ -466,6 +513,29 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     };
     print_query(out, &output)?;
     Ok(())
+}
+
+fn merge_diff_result(target: &mut ResultItem, source: ResultItem, evidence_limit: usize) {
+    target.score += source.score;
+    target.cochanges = target.cochanges.saturating_add(source.cochanges);
+    target.weight += source.weight;
+    if source.last_seen > target.last_seen {
+        target.last_seen = source.last_seen;
+    }
+    if target.reason != source.reason {
+        target.reason = "diff_aggregate".to_string();
+    }
+    if evidence_limit == 0 {
+        return;
+    }
+    target.evidence.extend(source.evidence);
+    target
+        .evidence
+        .sort_by(|left, right| right.date.cmp(&left.date).then(left.hash.cmp(&right.hash)));
+    target
+        .evidence
+        .dedup_by(|left, right| left.hash == right.hash);
+    target.evidence.truncate(evidence_limit);
 }
 
 fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
@@ -479,6 +549,7 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "max-files-per-commit",
             "half-life-days",
             "modes",
+            "query-shape",
         ],
         &[],
     )?;
@@ -487,40 +558,46 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     }
 
     let repo = flag_string(&parsed, "repo", ".");
-    let test_commits = flag_usize(&parsed, "test-commits", 200)?;
-    let train_commits = flag_usize(&parsed, "train-commits", 1000)?;
-    let top = flag_usize(&parsed, "top", 10)?;
-    let max_files = flag_usize(&parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?;
-    let half_life = flag_f64(&parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?;
+    let test_commits = flag_positive_usize(&parsed, "test-commits", 200)?;
+    let train_commits = flag_positive_usize(&parsed, "train-commits", 1000)?;
+    let top = flag_positive_usize(&parsed, "top", 10)?;
+    let max_files = flag_positive_usize(&parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?;
+    let half_life = flag_positive_f64(&parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?;
     let modes = parse_modes(&flag_string(&parsed, "modes", "direct,pagerank,path,hot"));
-    if test_commits == 0 || train_commits == 0 {
-        return Err("test-commits and train-commits must be positive".into());
-    }
-    if top == 0 {
-        return Err("top must be positive".into());
+    let query_shape = flag_string(&parsed, "query-shape", "on-demand");
+    for mode in &modes {
+        validate_query_mode(mode)?;
     }
 
-    let root = git_root(&repo)?;
-    let total = test_commits + train_commits;
-    let commits = git_log(&root, total, None)?;
-    if commits.len() < test_commits + 1 {
+    let repo = RepoContext::discover(&repo)?;
+    let root = repo.root_str()?;
+    let total = test_commits
+        .checked_add(train_commits)
+        .ok_or("test-commits and train-commits are too large")?;
+    let commits = git_log(root, total, None)?;
+    if commits.len() <= test_commits {
         return Err(format!("not enough commits for evaluation: got {}", commits.len()).into());
     }
     let available_total = commits.len().min(total);
     let test = &commits[..test_commits];
     let train = &commits[test_commits..available_total];
-    let data = build_graph_data(
-        &root,
-        train,
-        GraphBuildConfig {
-            max_files_per_commit: max_files,
-            half_life_days: half_life,
-            evidence_limit: 0,
-        },
-    );
-    let graph = RelatedGraph::new(&data);
-    let mut report = evaluate(&graph, test, &modes, top, max_files)?;
-    report.repo_root = root;
+    let graph_config = GraphBuildConfig {
+        max_files_per_commit: max_files,
+        half_life_days: half_life,
+        evidence_limit: 0,
+    };
+    let mut report = match query_shape.as_str() {
+        "on-demand" => evaluate_on_demand(train, test, &modes, top, graph_config)?,
+        "global" => {
+            let data = build_graph_data(root, train, graph_config);
+            let graph = RelatedGraph::new(&data);
+            evaluate_global(&graph, test, &modes, top, max_files)?
+        }
+        other => {
+            return Err(format!("unknown query shape {other:?}; use on-demand or global").into());
+        }
+    };
+    report.repo_root = root.to_string();
     report.train_commits = train.len();
     report.test_commits = test.len();
     report.top_k = top;
@@ -534,6 +611,39 @@ fn default_jobs() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
+}
+
+fn validate_query_mode(mode: &str) -> AnyResult<()> {
+    match mode {
+        "direct" | "pagerank" | "path" | "hot" => Ok(()),
+        other => Err(format!("unknown mode {other:?}; use direct, pagerank, path, or hot").into()),
+    }
+}
+
+fn configure_backend_for_repo(
+    repo: &RepoContext,
+    config: &mut OnDemandConfig,
+) -> AnyResult<Option<String>> {
+    let object_format = repo.object_format()?;
+    if object_format == "sha1"
+        || matches!(
+            config.backend,
+            OnDemandBackend::GitCli | OnDemandBackend::GitRemoveEmpty
+        )
+    {
+        return Ok(None);
+    }
+    if config.backend_explicit {
+        return Err(format!(
+            "history backend {:?} does not support Git object format {object_format:?}; use --history-backend git",
+            config.backend
+        )
+        .into());
+    }
+    config.backend = OnDemandBackend::GitCli;
+    Ok(Some(format!(
+        "Git object format {object_format} is not supported by pack-fast; used the git backend instead."
+    )))
 }
 
 fn parse_on_demand_backend(value: &str) -> AnyResult<OnDemandBackend> {
@@ -558,27 +668,11 @@ fn parse_on_demand_backend(value: &str) -> AnyResult<OnDemandBackend> {
     }
 }
 
-fn git_root(repo: &str) -> AnyResult<String> {
-    let abs = fs::canonicalize(repo)?;
-    if looks_like_worktree_root(&abs) {
-        return Ok(abs.display().to_string());
-    }
-    let out = run_git(&abs, &["rev-parse", "--show-toplevel"])?;
-    Ok(String::from_utf8(out)?.trim().to_string())
-}
-
-fn looks_like_worktree_root(path: &Path) -> bool {
-    let git = path.join(".git");
-    if git.is_file() {
-        return true;
-    }
-    git.is_dir() && git.join("HEAD").is_file()
-}
-
 fn git_log(repo: &str, max_commits: usize, since: Option<&str>) -> AnyResult<Vec<Commit>> {
     let mut args = vec![
         "log".to_string(),
         "--name-only".to_string(),
+        "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
         "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s".to_string(),
     ];
@@ -624,6 +718,7 @@ fn git_log_for_target_git(
         "--no-renames".to_string(),
         "--full-diff".to_string(),
         "--name-only".to_string(),
+        "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
         "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s".to_string(),
     ];
@@ -814,6 +909,7 @@ fn git_log_direct_for_target_git(
         "--no-renames".to_string(),
         "--full-diff".to_string(),
         "--name-only".to_string(),
+        "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
         pretty.to_string(),
     ];
@@ -905,6 +1001,7 @@ fn git_show_selected_commits(repo: &str, seeds: &[GixCommitSeed]) -> AnyResult<V
         "--stdin",
         "--full-diff",
         "--name-only",
+        "-z",
         "--diff-filter=ACMRT",
         "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s",
     ];
@@ -928,6 +1025,7 @@ fn git_diff_tree_selected_commits(repo: &str, seeds: &[GixCommitSeed]) -> AnyRes
         "--root",
         "-r",
         "--name-only",
+        "-z",
         "--diff-filter=ACMRT",
         "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s",
     ];
@@ -957,6 +1055,7 @@ fn git_diff_tree_direct_from_hash_input(
         "--root",
         "-r",
         "--name-only",
+        "-z",
         "--diff-filter=ACMRT",
         pretty,
     ];
@@ -3020,6 +3119,7 @@ fn git_show_commit_for_target(
         "show",
         "--full-diff",
         "--name-only",
+        "-z",
         "--diff-filter=ACMRT",
         "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s",
         commit_id.as_str(),
@@ -3142,19 +3242,59 @@ fn format_gix_time(time: gix::date::Time) -> String {
     time.format_or_unix(gix::date::time::format::ISO8601_STRICT)
 }
 
-fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
-    let text = std::str::from_utf8(out)?;
-    let mut commits = Vec::new();
-    for raw_record in text.split('\x1e') {
-        let raw_record = raw_record.trim();
-        if raw_record.is_empty() {
-            continue;
+struct GitLogRecord<'a> {
+    header: &'a str,
+    files: Vec<String>,
+}
+
+fn parse_git_log_record(raw_record: &[u8]) -> AnyResult<Option<GitLogRecord<'_>>> {
+    let raw_record = raw_record
+        .iter()
+        .position(|byte| *byte != b'\n' && *byte != 0)
+        .map_or(&[][..], |start| &raw_record[start..]);
+    if raw_record.is_empty() {
+        return Ok(None);
+    }
+
+    let header_end = raw_record
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or_else(|| {
+            raw_record
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(raw_record.len())
+        });
+    let header = std::str::from_utf8(&raw_record[..header_end])?;
+    if header.is_empty() {
+        return Ok(None);
+    }
+
+    let file_bytes = match raw_record.get(header_end) {
+        Some(b'\n' | 0) => &raw_record[header_end + 1..],
+        _ => &[],
+    };
+    let separator = if file_bytes.contains(&0) { 0 } else { b'\n' };
+    let mut files = Vec::new();
+    for raw_path in file_bytes
+        .split(|byte| *byte == separator)
+        .filter(|path| !path.is_empty())
+    {
+        let path = decode_git_path(raw_path)?;
+        if !path.is_empty() {
+            files.push(path);
         }
-        let mut lines = raw_record.lines();
-        let Some(header) = lines.next() else {
+    }
+    Ok(Some(GitLogRecord { header, files }))
+}
+
+fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
+    let mut commits = Vec::new();
+    for raw_record in out.split(|byte| *byte == 0x1e) {
+        let Some(record) = parse_git_log_record(raw_record)? else {
             continue;
         };
-        let mut fields = header.splitn(4, '\x1f');
+        let mut fields = record.header.splitn(4, '\x1f');
         let hash = fields.next().ok_or("missing commit hash")?.to_string();
         let unix_time: i64 = fields
             .next()
@@ -3165,8 +3305,7 @@ fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
         let subject = fields.next().unwrap_or_default().to_string();
         let mut seen = HashSet::default();
         let mut files = Vec::new();
-        for line in lines {
-            let file = normalize_git_path(line);
+        for file in record.files {
             if file.is_empty() || !seen.insert(file.clone()) {
                 continue;
             }
@@ -3190,40 +3329,24 @@ fn parse_git_log_direct(
     top: usize,
     evidence_limit: isize,
 ) -> AnyResult<Vec<ResultItem>> {
-    let text = std::str::from_utf8(out)?;
-    let max_files = if config.max_files_per_commit == 0 {
-        DEFAULT_MAX_FILES
-    } else {
-        config.max_files_per_commit
-    };
-    let half_life = if config.half_life_days <= 0.0 {
-        DEFAULT_HALF_LIFE_DAYS
-    } else {
-        config.half_life_days
-    };
+    let max_files = config.max_files_per_commit;
+    let half_life = config.half_life_days;
     let mut latest = None;
     let mut target_weight = 0.0;
-    let mut pairs: HashMap<&str, DirectPairStat<'_>> =
+    let mut pairs: HashMap<String, DirectPairStat> =
         HashMap::with_capacity_and_hasher(direct_pair_capacity(top), Default::default());
-    let mut other_files = Vec::with_capacity(max_files.min(DEFAULT_MAX_FILES));
-
-    for raw_record in text.split('\x1e') {
-        other_files.clear();
-        let raw_record = raw_record.strip_prefix('\n').unwrap_or(raw_record);
-        if raw_record.is_empty() {
-            continue;
-        }
-        let mut lines = raw_record.lines();
-        let Some(header) = lines.next() else {
+    for raw_record in out.split(|byte| *byte == 0x1e) {
+        let Some(record) = parse_git_log_record(raw_record)? else {
             continue;
         };
         let (hash, unix_time_raw, date, subject) = if config.evidence_limit == 0 {
-            let (unix_time_raw, date) = header
+            let (unix_time_raw, date) = record
+                .header
                 .split_once('\x1f')
                 .ok_or("missing compact commit header field")?;
             ("", unix_time_raw, date, "")
         } else {
-            let mut fields = header.splitn(4, '\x1f');
+            let mut fields = record.header.splitn(4, '\x1f');
             let hash = fields.next().ok_or("missing commit hash")?;
             let unix_time_raw = fields.next().ok_or("missing commit unix time")?;
             let date = fields.next().ok_or("missing commit date")?;
@@ -3233,23 +3356,8 @@ fn parse_git_log_direct(
         let unix_time: i64 = unix_time_raw
             .parse()
             .map_err(|err| format!("invalid commit unix time: {err}"))?;
-        let mut file_count = 0usize;
-        let mut has_target = false;
-
-        for line in lines {
-            if line.is_empty() {
-                continue;
-            }
-            file_count += 1;
-            if line == target {
-                has_target = true;
-            } else {
-                other_files.push(line);
-            }
-            if file_count > max_files {
-                break;
-            }
-        }
+        let file_count = record.files.len();
+        let has_target = record.files.iter().any(|file| file == target);
         if file_count == 0 || file_count > max_files || !has_target {
             continue;
         }
@@ -3260,13 +3368,13 @@ fn parse_git_log_direct(
 
         let pair_weight = decay / ((file_count + 1) as f64).log2();
         let mut evidence = None;
-        for other in &other_files {
-            let pair = pairs.entry(*other).or_default();
+        for other in record.files.iter().filter(|file| file.as_str() != target) {
+            let pair = pairs.entry(other.clone()).or_default();
             pair.cochanges += 1;
             pair.weight += pair_weight;
             pair.other_weight += decay;
-            if pair.last_seen.is_empty() || date > pair.last_seen {
-                pair.last_seen = date;
+            if pair.last_seen.is_empty() || date > pair.last_seen.as_str() {
+                pair.last_seen = date.to_string();
             }
             if pair.evidence.len() < config.evidence_limit {
                 let evidence = evidence.get_or_insert_with(|| Evidence {
@@ -3412,7 +3520,7 @@ fn query_direct_from_commits(
         .max()
         .unwrap_or(0);
     let mut target_weight = 0.0;
-    let mut pairs: HashMap<&str, DirectPairStat<'_>> =
+    let mut pairs: HashMap<String, DirectPairStat> =
         HashMap::with_capacity_and_hasher(direct_pair_capacity(top), Default::default());
 
     for commit in commits {
@@ -3430,13 +3538,13 @@ fn query_direct_from_commits(
             if other == target {
                 continue;
             }
-            let pair = pairs.entry(other.as_str()).or_default();
+            let pair = pairs.entry(other.clone()).or_default();
             pair.cochanges += 1;
             pair.weight += pair_weight;
             pair.other_weight += decay;
             let date = commit.date.as_str();
-            if pair.last_seen.is_empty() || date > pair.last_seen {
-                pair.last_seen = date;
+            if pair.last_seen.is_empty() || date > pair.last_seen.as_str() {
+                pair.last_seen = date.to_string();
             }
             if pair.evidence.len() < config.evidence_limit {
                 let evidence = evidence.get_or_insert_with(|| Evidence {
@@ -3666,13 +3774,18 @@ impl<'a> RelatedGraph<'a> {
         }
     }
 
-    fn resolve_path(&self, repo_root: &str, input: &str) -> AnyResult<String> {
-        let path = normalize_input_path(repo_root, input);
+    fn resolve_path(&self, repo_root: &str, input_base: &Path, input: &str) -> AnyResult<String> {
+        let path = normalize_input_path(Path::new(repo_root), input_base, input)?;
         self.resolve_known_or_ambiguous_path(input, path, true)
     }
 
-    fn resolve_path_or_tracked(&self, repo_root: &str, input: &str) -> AnyResult<String> {
-        let path = normalize_input_path(repo_root, input);
+    fn resolve_path_or_tracked(
+        &self,
+        repo_root: &str,
+        input_base: &Path,
+        input: &str,
+    ) -> AnyResult<String> {
+        let path = normalize_input_path(Path::new(repo_root), input_base, input)?;
         self.resolve_known_or_tracked_path(repo_root, input, path)
     }
 
@@ -3755,134 +3868,6 @@ fn ambiguous_path_error(input: &str, matches: &[&str]) -> String {
     format!("{input:?} is ambiguous: {}", matches.join(", "))
 }
 
-fn evaluate(
-    graph: &RelatedGraph<'_>,
-    test: &[Commit],
-    modes: &[String],
-    top: usize,
-    max_files: usize,
-) -> AnyResult<EvalReport> {
-    let mut accs: HashMap<String, EvalAccumulator> = modes
-        .iter()
-        .map(|mode| {
-            (
-                mode.clone(),
-                EvalAccumulator {
-                    mode: mode.clone(),
-                    tasks: 0,
-                    hit_tasks: 0,
-                    precision_sum: 0.0,
-                    recall_sum: 0.0,
-                    mrr_sum: 0.0,
-                    results_sum: 0,
-                },
-            )
-        })
-        .collect();
-    let mut report = EvalReport {
-        repo_root: String::new(),
-        train_commits: 0,
-        test_commits: 0,
-        top_k: top,
-        max_files_per_commit: max_files,
-        candidate_tasks: 0,
-        evaluated_tasks: 0,
-        skipped_unknown_seed: 0,
-        skipped_no_known_target: 0,
-        metrics: Vec::new(),
-    };
-
-    for commit in test {
-        if commit.files.len() < 2 || commit.files.len() > max_files {
-            continue;
-        }
-        let known_files: Vec<&String> = commit
-            .files
-            .iter()
-            .filter(|file| graph.data.files.contains_key(*file))
-            .collect();
-        if known_files.len() < 2 {
-            continue;
-        }
-        let known_set: HashSet<String> = known_files.iter().map(|file| (*file).clone()).collect();
-        for seed in &commit.files {
-            report.candidate_tasks += 1;
-            if !known_set.contains(seed) {
-                report.skipped_unknown_seed += 1;
-                continue;
-            }
-            let targets: HashSet<String> = commit
-                .files
-                .iter()
-                .filter(|target| *target != seed && known_set.contains(*target))
-                .cloned()
-                .collect();
-            if targets.is_empty() {
-                report.skipped_no_known_target += 1;
-                continue;
-            }
-            report.evaluated_tasks += 1;
-            for mode in modes {
-                let results = graph.query(seed, mode, top, -1)?;
-                accs.get_mut(mode)
-                    .expect("mode accumulator")
-                    .add(&results, &targets, top);
-            }
-        }
-    }
-
-    report.metrics = modes
-        .iter()
-        .filter_map(|mode| accs.remove(mode).map(|acc| acc.metrics()))
-        .collect();
-    report
-        .metrics
-        .sort_by(|left, right| left.mode.cmp(&right.mode));
-    Ok(report)
-}
-
-impl EvalAccumulator {
-    fn add(&mut self, results: &[ResultItem], targets: &HashSet<String>, top: usize) {
-        self.tasks += 1;
-        let limit = results.len().min(top);
-        let mut hits = 0;
-        let mut first_hit = 0;
-        for (idx, result) in results.iter().take(limit).enumerate() {
-            if targets.contains(&result.path) {
-                hits += 1;
-                if first_hit == 0 {
-                    first_hit = idx + 1;
-                }
-            }
-        }
-        if hits > 0 {
-            self.hit_tasks += 1;
-            self.mrr_sum += 1.0 / first_hit as f64;
-        }
-        self.precision_sum += hits as f64 / top as f64;
-        self.recall_sum += hits as f64 / targets.len() as f64;
-        self.results_sum += results.len();
-    }
-
-    fn metrics(self) -> EvalMetrics {
-        if self.tasks == 0 {
-            return EvalMetrics {
-                mode: self.mode,
-                ..Default::default()
-            };
-        }
-        EvalMetrics {
-            mode: self.mode,
-            tasks: self.tasks,
-            hit_rate_at_k: self.hit_tasks as f64 / self.tasks as f64,
-            precision_at_k: self.precision_sum / self.tasks as f64,
-            recall_at_k: self.recall_sum / self.tasks as f64,
-            mrr: self.mrr_sum / self.tasks as f64,
-            avg_results: self.results_sum as f64 / self.tasks as f64,
-        }
-    }
-}
-
 fn pair_result(
     pair: &PairStat,
     path: &str,
@@ -3911,8 +3896,8 @@ fn pair_result(
 }
 
 fn direct_pair_result(
-    pair: DirectPairStat<'_>,
-    path: &str,
+    pair: DirectPairStat,
+    path: String,
     score: f64,
     reason: &str,
     evidence_limit: isize,
@@ -3926,11 +3911,11 @@ fn direct_pair_result(
         pair.evidence
     };
     ResultItem {
-        path: path.to_string(),
+        path,
         score,
         cochanges: pair.cochanges,
         weight: pair.weight,
-        last_seen: pair.last_seen.to_string(),
+        last_seen: pair.last_seen,
         reason: reason.to_string(),
         evidence,
     }
@@ -3963,7 +3948,7 @@ fn pack_direct_pair_result(
 }
 
 fn time_decay(latest: i64, when: i64, half_life_days: f64) -> f64 {
-    if half_life_days <= 0.0 {
+    if !half_life_days.is_finite() || half_life_days <= 0.0 {
         return 1.0;
     }
     let age_days = ((latest - when).max(0) as f64) / 86_400.0;
@@ -3986,7 +3971,7 @@ fn truncate_top_results(results: &mut Vec<ResultItem>, top: usize) {
     sort_results(results);
 }
 
-fn truncate_top_direct_pairs(results: &mut Vec<DirectScoredPair<'_>>, top: usize) {
+fn truncate_top_direct_pairs(results: &mut Vec<DirectScoredPair>, top: usize) {
     if top == 0 {
         results.clear();
         return;
@@ -4025,11 +4010,11 @@ fn effective_max_files(config: &OnDemandConfig) -> usize {
     }
 }
 
-fn direct_scored_pair_cmp(left: &DirectScoredPair<'_>, right: &DirectScoredPair<'_>) -> Ordering {
+fn direct_scored_pair_cmp(left: &DirectScoredPair, right: &DirectScoredPair) -> Ordering {
     right
         .score
         .total_cmp(&left.score)
-        .then(left.path.cmp(right.path))
+        .then(left.path.cmp(&right.path))
 }
 
 fn pack_direct_scored_pair_cmp(
@@ -4050,6 +4035,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn nul_git_log_parser_preserves_newlines_in_paths() {
+        let raw = b"hash\x1f1\x1f2026-01-01T00:00:00Z\x1fsubject\n\0line\nbreak.md\0other.md\0";
+        let record = parse_git_log_record(raw).unwrap().unwrap();
+        assert_eq!(record.files, vec!["line\nbreak.md", "other.md"]);
+    }
 
     #[test]
     fn git_tree_name_comparator_matches_directory_sort_rule() {
@@ -4109,6 +4101,7 @@ mod tests {
         assert_eq!(commits.len(), 4);
         let config = OnDemandConfig {
             backend: OnDemandBackend::GitDiffTree,
+            backend_explicit: true,
             max_commits: 20,
             since: None,
             max_files_per_commit: 10,
@@ -4194,7 +4187,7 @@ mod tests {
                 .contains_key(&pair_key("src/auth.ts", "tests/auth.test.ts"))
         );
 
-        let report = evaluate(
+        let report = evaluate_global(
             &graph,
             &commits[..1],
             &[
@@ -4296,6 +4289,285 @@ mod tests {
     }
 
     #[test]
+    fn cli_query_resolves_paths_from_repo_argument_base() {
+        let repo = new_test_repo();
+        write_commit(
+            &repo,
+            "nested pair",
+            &[("src/a.md", "a\n"), ("src/b.md", "b\n")],
+        );
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--repo".to_string(),
+                repo.join("src").display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("related src/a.md direct:on-demand:GitCli\n"));
+        assert!(text.contains("1 src/b.md co=1"));
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn cli_query_rejects_missing_targets_and_non_finite_decay() {
+        let repo = new_test_repo();
+        write_commit(&repo, "pair", &[("a.md", "a\n"), ("b.md", "b\n")]);
+
+        let missing = run_with_writer(
+            vec![
+                "query".to_string(),
+                "missing.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("is not tracked in the repository"));
+
+        let nan = run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--half-life-days".to_string(),
+                "NaN".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(nan.contains("must be a finite positive number"));
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn cli_eval_defaults_to_on_demand_and_keeps_global_available() {
+        let repo = new_test_repo();
+        write_commit(&repo, "pair one", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
+        write_commit(&repo, "pair two", &[("a.md", "a2\n"), ("b.md", "b2\n")]);
+        write_commit(&repo, "pair three", &[("a.md", "a3\n"), ("b.md", "b3\n")]);
+
+        for (extra, expected_shape) in [
+            (Vec::<String>::new(), "on-demand"),
+            (
+                vec!["--query-shape".to_string(), "global".to_string()],
+                "global",
+            ),
+        ] {
+            let mut args = vec![
+                "eval".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--test-commits".to_string(),
+                "1".to_string(),
+                "--train-commits".to_string(),
+                "2".to_string(),
+                "--top".to_string(),
+                "1".to_string(),
+                "--modes".to_string(),
+                "direct".to_string(),
+            ];
+            args.extend(extra);
+            let mut output = Vec::new();
+            run_with_writer(args, &mut output).unwrap();
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains(&format!("query_shape={expected_shape}")));
+            assert!(text.contains("direct"));
+        }
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn git_backend_and_diff_support_unicode_paths() {
+        let repo = new_test_repo();
+        write_commit(
+            &repo,
+            "unicode pair",
+            &[("café.md", "one\n"), ("other.md", "other\n")],
+        );
+
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "query".to_string(),
+                "café.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("1 other.md co=1"));
+
+        fs::write(repo.join("café.md"), "two\n").unwrap();
+        git(&repo, &["add", "café.md"]);
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "diff".to_string(),
+                "--staged".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "git".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("related café.md direct\n"));
+        assert!(text.contains("1 other.md co=1"));
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn default_backend_falls_back_for_sha256_repositories() {
+        let repo = temp_dir();
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--object-format=sha256"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "Test User"]);
+        write_commit(&repo, "pair", &[("a.md", "a\n"), ("b.md", "b\n")]);
+
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with("related a.md direct:on-demand:GitCli\n"));
+        assert!(text.contains("1 b.md co=1"));
+        assert!(text.contains("used the git backend instead"));
+
+        let explicit_pack = run_with_writer(
+            vec![
+                "query".to_string(),
+                "a.md".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--history-backend".to_string(),
+                "pack-scan".to_string(),
+            ],
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(explicit_pack.contains("does not support Git object format \"sha256\""));
+        assert!(explicit_pack.contains("use --history-backend git"));
+
+        fs::remove_dir_all(repo).ok();
+    }
+
+    #[test]
+    fn diff_aggregation_merges_metadata_and_deduplicates_evidence() {
+        fn evidence(hash: &str, date: &str) -> Evidence {
+            Evidence {
+                hash: hash.to_string(),
+                date: date.to_string(),
+                subject: hash.to_string(),
+                file_count: 2,
+                weight: 1.0,
+            }
+        }
+
+        let mut target = ResultItem {
+            path: "shared.md".to_string(),
+            score: 1.25,
+            cochanges: 2,
+            weight: 0.5,
+            last_seen: "2026-01-01".to_string(),
+            reason: "direct_cochange".to_string(),
+            evidence: vec![
+                evidence("same", "2026-01-01"),
+                evidence("old", "2025-01-01"),
+            ],
+        };
+        let source = ResultItem {
+            path: "shared.md".to_string(),
+            score: 2.75,
+            cochanges: 3,
+            weight: 1.5,
+            last_seen: "2026-02-01".to_string(),
+            reason: "pagerank_direct_evidence".to_string(),
+            evidence: vec![
+                evidence("new", "2026-02-01"),
+                evidence("same", "2026-01-01"),
+            ],
+        };
+
+        merge_diff_result(&mut target, source, 2);
+
+        assert_eq!(target.score, 4.0);
+        assert_eq!(target.cochanges, 5);
+        assert_eq!(target.weight, 2.0);
+        assert_eq!(target.last_seen, "2026-02-01");
+        assert_eq!(target.reason, "diff_aggregate");
+        assert_eq!(
+            target
+                .evidence
+                .iter()
+                .map(|item| item.hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new", "same"]
+        );
+    }
+
+    #[test]
+    fn on_demand_eval_matches_the_shipping_graph_shape() {
+        fn commit(hash: &str, time: i64, files: &[&str]) -> Commit {
+            Commit {
+                hash: hash.to_string(),
+                unix_time: time,
+                date: format!("2026-01-{:02}T00:00:00Z", time),
+                subject: hash.to_string(),
+                files: files.iter().map(|file| (*file).to_string()).collect(),
+            }
+        }
+
+        let train = vec![
+            commit("ab", 2, &["a.md", "b.md"]),
+            commit("bc", 1, &["b.md", "c.md"]),
+        ];
+        let test = vec![commit("ac", 3, &["a.md", "c.md"])];
+        let config = GraphBuildConfig {
+            max_files_per_commit: 10,
+            half_life_days: 365.0,
+            evidence_limit: 0,
+        };
+        let modes = vec!["pagerank".to_string()];
+        let data = build_graph_data("", &train, config);
+        let graph = RelatedGraph::new(&data);
+        let global = evaluate_global(&graph, &test, &modes, 2, 10).unwrap();
+        let on_demand = evaluate_on_demand(&train, &test, &modes, 2, config).unwrap();
+
+        assert_eq!(global.query_shape, "global");
+        assert_eq!(on_demand.query_shape, "on-demand");
+        assert_eq!(global.metrics[0].hit_rate_at_k, 1.0);
+        assert_eq!(on_demand.metrics[0].hit_rate_at_k, 0.0);
+    }
+
+    #[test]
     fn cli_query_supports_exclude_patterns() {
         let repo = new_test_repo();
         write_commit(
@@ -4357,6 +4629,7 @@ mod tests {
         write_commit(&repo, "other pair", &[("c.md", "c1\n"), ("d.md", "d1\n")]);
         let config = OnDemandConfig {
             backend: OnDemandBackend::GitCli,
+            backend_explicit: true,
             max_commits: 20,
             since: None,
             max_files_per_commit: 10,
@@ -4368,7 +4641,7 @@ mod tests {
         };
 
         let related =
-            explain_relationship(repo.to_str().unwrap(), "a.md", "b.md", &config).unwrap();
+            explain_relationship(repo.to_str().unwrap(), &repo, "a.md", "b.md", &config).unwrap();
         assert!(related.related);
         assert_eq!(related.a, "a.md");
         assert_eq!(related.b, "b.md");
@@ -4376,15 +4649,16 @@ mod tests {
         assert_eq!(related.evidence[0].subject, "pair");
 
         let unrelated =
-            explain_relationship(repo.to_str().unwrap(), "a.md", "c.md", &config).unwrap();
+            explain_relationship(repo.to_str().unwrap(), &repo, "a.md", "c.md", &config).unwrap();
         assert!(!unrelated.related);
         assert_eq!(unrelated.a, "a.md");
         assert_eq!(unrelated.b, "c.md");
         assert_eq!(unrelated.cochanges, 0);
 
-        let missing = explain_relationship(repo.to_str().unwrap(), "a.md", "missing.md", &config)
-            .unwrap_err()
-            .to_string();
+        let missing =
+            explain_relationship(repo.to_str().unwrap(), &repo, "a.md", "missing.md", &config)
+                .unwrap_err()
+                .to_string();
         assert!(missing.contains("not tracked in the repository"));
 
         let mut output = Vec::new();
@@ -4444,6 +4718,7 @@ mod tests {
         );
         let config = OnDemandConfig {
             backend: OnDemandBackend::GitCli,
+            backend_explicit: true,
             max_commits: 20,
             since: None,
             max_files_per_commit: 10,
@@ -4478,6 +4753,7 @@ mod tests {
 
         let mut config = OnDemandConfig {
             backend: OnDemandBackend::PackScan,
+            backend_explicit: true,
             max_commits: 20,
             since: None,
             max_files_per_commit: 10,

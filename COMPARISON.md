@@ -21,7 +21,8 @@ The narrower position for `related` is:
 - direct co-change and Personalized PageRank over the co-change graph
 - `related query <file>` compact text output for LLM tools
 - `related explain <a> <b>` evidence commits
-- built-in holdout evaluation with `direct`, `pagerank`, and `path` baselines
+- built-in holdout evaluation with target-local `on-demand` and research
+  `global` query shapes plus `direct`, `pagerank`, and `path` baselines
 
 That makes it weaker than the larger systems for full code intelligence, but
 cleaner for the specific job of "given this file, what should an agent read next

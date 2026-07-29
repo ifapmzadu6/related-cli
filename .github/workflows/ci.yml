@@ -41,3 +41,25 @@ jobs:
         run: RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --dry-run
       - name: Check packaged npm installer
         run: scripts/check_npm_package.sh
+
+  cross-platform-test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        shell: bash
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          rustup toolchain install --profile minimal
+      - name: Test
+        run: cargo test --locked --quiet

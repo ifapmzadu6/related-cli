@@ -36,17 +36,17 @@ pub(crate) struct PairStat {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct DirectPairStat<'a> {
+pub(crate) struct DirectPairStat {
     pub(crate) cochanges: usize,
     pub(crate) weight: f64,
     pub(crate) other_weight: f64,
-    pub(crate) last_seen: &'a str,
+    pub(crate) last_seen: String,
     pub(crate) evidence: Vec<Evidence>,
 }
 
-pub(crate) struct DirectScoredPair<'a> {
-    pub(crate) path: &'a str,
-    pub(crate) pair: DirectPairStat<'a>,
+pub(crate) struct DirectScoredPair {
+    pub(crate) path: String,
+    pub(crate) pair: DirectPairStat,
     pub(crate) score: f64,
 }
 
@@ -126,6 +126,7 @@ pub(crate) struct ExplainOutput {
 #[derive(Clone, Debug)]
 pub(crate) struct EvalReport {
     pub(crate) repo_root: String,
+    pub(crate) query_shape: String,
     pub(crate) train_commits: usize,
     pub(crate) test_commits: usize,
     pub(crate) top_k: usize,
@@ -198,6 +199,7 @@ pub(crate) struct GixCommitSeed {
 #[derive(Clone, Debug)]
 pub(crate) struct OnDemandConfig {
     pub(crate) backend: OnDemandBackend,
+    pub(crate) backend_explicit: bool,
     pub(crate) max_commits: usize,
     pub(crate) since: Option<String>,
     pub(crate) max_files_per_commit: usize,
