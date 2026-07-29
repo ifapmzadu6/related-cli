@@ -17,7 +17,7 @@ impl RepoContext {
         } else {
             let out = run_git(&input_base, &["rev-parse", "--show-toplevel"])?;
             let root = std::str::from_utf8(&out)?.trim_end_matches(['\r', '\n']);
-            PathBuf::from(root)
+            fs::canonicalize(root)?
         };
         Ok(Self { root, input_base })
     }
