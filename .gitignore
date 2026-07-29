@@ -3,5 +3,6 @@ target/
 /.related/
 *.test
 __pycache__/
+.DS_Store
 npm/prebuilt/*/related
 npm/prebuilt/*/related.exe

@@ -1,5 +1,5 @@
 use crate::AnyResult;
-use crate::path_utils::{literal_pathspec, normalize_git_path};
+use crate::path_utils::{decode_git_path, literal_pathspec};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -80,14 +80,17 @@ pub(crate) fn git_path_is_tracked(repo: &str, path: &str) -> AnyResult<bool> {
 
 pub(crate) fn git_diff_names(repo: &str, staged: bool) -> AnyResult<Vec<String>> {
     let args = if staged {
-        vec!["diff", "--name-only", "--cached"]
+        vec!["diff", "--name-only", "-z", "--cached"]
     } else {
-        vec!["diff", "--name-only"]
+        vec!["diff", "--name-only", "-z"]
     };
     let out = run_git(repo, &args)?;
-    Ok(String::from_utf8(out)?
-        .lines()
-        .map(normalize_git_path)
-        .filter(|path| !path.is_empty())
-        .collect())
+    let mut paths = Vec::new();
+    for raw_path in out.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        let path = decode_git_path(raw_path)?;
+        if !path.is_empty() {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
 }

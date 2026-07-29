@@ -86,6 +86,26 @@ pub(crate) fn flag_f64(parsed: &ParsedArgs, name: &str, default: f64) -> AnyResu
         .map_err(|err| format!("invalid --{name} value {value:?}: {err}").into())
 }
 
+pub(crate) fn flag_positive_usize(
+    parsed: &ParsedArgs,
+    name: &str,
+    default: usize,
+) -> AnyResult<usize> {
+    let value = flag_usize(parsed, name, default)?;
+    if value == 0 {
+        return Err(format!("--{name} must be positive").into());
+    }
+    Ok(value)
+}
+
+pub(crate) fn flag_positive_f64(parsed: &ParsedArgs, name: &str, default: f64) -> AnyResult<f64> {
+    let value = flag_f64(parsed, name, default)?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("--{name} must be a finite positive number").into());
+    }
+    Ok(value)
+}
+
 pub(crate) fn parse_modes(input: &str) -> Vec<String> {
     let mut seen = HashSet::default();
     let mut modes = Vec::new();

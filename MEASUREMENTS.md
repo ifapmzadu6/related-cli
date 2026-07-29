@@ -225,7 +225,7 @@ The total input-token counts include Codex's fixed harness and prompt-cache
 behavior, so they are useful as a smoke test but weaker than the direct
 command-output token counts above.
 
-## VS Code Accuracy
+## VS Code Accuracy (global-graph evaluator)
 
 Repository:
 
@@ -779,10 +779,11 @@ Takeaways:
 
 Earlier measurements included persistent-index size and cold-load timings. That
 path has been removed from the CLI: `query`, `explain`, and `diff` now build the
-needed graph on demand for the requested target file or changed files. Historical
-accuracy measurements above still use the same in-memory graph construction for
-evaluation, but no saved graph artifact is produced or consumed by normal CLI
-workflows.
+needed graph on demand for the requested target file or changed files. The
+historical accuracy measurements above use the global in-memory evaluation
+shape, while normal CLI workflows use a target-local graph and never produce or
+consume a saved graph artifact. The newer `--query-shape on-demand` evaluator
+exists specifically to measure that target-local shape.
 
 The release binary size was `4.7 MiB` after the pack-only hot-path
 optimizations.
@@ -817,6 +818,11 @@ Takeaways:
 
 ## Measurement Caveats
 
+- The accuracy tables in this document were recorded with the global-graph
+  evaluator and correspond to `related eval --query-shape global`. They measure
+  the predictive value of the history signal, not the exact target-local graph
+  used by the shipping query. New evaluations default to `--query-shape
+  on-demand` so production-query accuracy can be measured separately.
 - The evaluator only scores files that already appear in the training graph.
   New files in held-out commits are counted as skipped unknown seeds.
 - `path` is not grep. Grep needs a text query, while this benchmark starts from a

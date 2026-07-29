@@ -1,8 +1,13 @@
+use crate::AnyResult;
 use rustc_hash::FxHashMap as HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub(crate) fn normalize_git_path(path: &str) -> String {
-    let mut path = path.trim().replace('\\', "/");
+    let mut path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_string()
+    };
     while path.starts_with("./") {
         path = path[2..].to_string();
     }
@@ -18,15 +23,58 @@ pub(crate) fn normalize_git_path(path: &str) -> String {
     }
 }
 
-pub(crate) fn normalize_input_path(repo_root: &str, input: &str) -> String {
-    let input = input.trim();
-    let path = Path::new(input);
-    if path.is_absolute()
-        && let Ok(rel) = path.strip_prefix(repo_root)
-    {
-        return normalize_git_path(&rel.display().to_string());
+pub(crate) fn decode_git_path(raw: &[u8]) -> AnyResult<String> {
+    let path = std::str::from_utf8(raw)
+        .map_err(|_| "Git path is not valid UTF-8; this path is not supported")?;
+    Ok(normalize_git_path(path))
+}
+
+pub(crate) fn normalize_input_path(
+    repo_root: &Path,
+    input_base: &Path,
+    input: &str,
+) -> AnyResult<String> {
+    if input.is_empty() {
+        return Err("file path must not be empty".into());
     }
-    normalize_git_path(input)
+
+    let input = Path::new(input);
+    let absolute = if input.is_absolute() {
+        lexical_normalize(input)
+    } else {
+        lexical_normalize(&input_base.join(input))
+    };
+    let relative = absolute.strip_prefix(repo_root).map_err(|_| {
+        format!(
+            "path {} is outside repository {}",
+            absolute.display(),
+            repo_root.display()
+        )
+    })?;
+    let relative = relative
+        .to_str()
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", relative.display()))?;
+    let normalized = normalize_git_path(relative);
+    if normalized.is_empty() {
+        return Err("file path must refer to a file inside the repository".into());
+    }
+    Ok(normalized)
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 #[inline]

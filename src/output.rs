@@ -1,14 +1,20 @@
 use crate::model::{EvalReport, QueryOutput};
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
-    writeln!(out, "related {} {}", output.target, output.mode)?;
+    writeln!(
+        out,
+        "related {} {}",
+        escape_text(&output.target),
+        escape_text(&output.mode)
+    )?;
     if output.related.is_empty() {
         writeln!(out, "no related files found")?;
         return Ok(());
     }
     for (idx, item) in output.related.iter().enumerate() {
-        write!(out, "{} {}", idx + 1, item.path)?;
+        write!(out, "{} {}", idx + 1, escape_text(&item.path))?;
         if item.cochanges > 0 {
             write!(out, " co={}", item.cochanges)?;
         }
@@ -35,7 +41,7 @@ pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Re
                 ev.date,
                 ev.file_count,
                 ev.weight,
-                ev.subject
+                escape_text(&ev.subject)
             )?;
         }
     }
@@ -57,11 +63,15 @@ fn compact_reason(reason: &str) -> Option<&str> {
 }
 
 pub(crate) fn print_eval<W: Write>(out: &mut W, report: &EvalReport) -> io::Result<()> {
-    writeln!(out, "repo: {}", report.repo_root)?;
+    writeln!(out, "repo: {}", escape_text(&report.repo_root))?;
     writeln!(
         out,
-        "train_commits={} test_commits={} top_k={} max_files_per_commit={}",
-        report.train_commits, report.test_commits, report.top_k, report.max_files_per_commit
+        "query_shape={} train_commits={} test_commits={} top_k={} max_files_per_commit={}",
+        report.query_shape,
+        report.train_commits,
+        report.test_commits,
+        report.top_k,
+        report.max_files_per_commit
     )?;
     writeln!(
         out,
@@ -95,4 +105,30 @@ pub(crate) fn print_eval<W: Write>(out: &mut W, report: &EvalReport) -> io::Resu
 
 pub(crate) fn short_hash(hash: &str) -> &str {
     hash.get(..12).unwrap_or(hash)
+}
+
+pub(crate) fn escape_text(value: &str) -> Cow<'_, str> {
+    if !value.chars().any(char::is_control) {
+        return Cow::Borrowed(value);
+    }
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control() {
+            escaped.extend(ch.escape_default());
+        } else {
+            escaped.push(ch);
+        }
+    }
+    Cow::Owned(escaped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_text;
+
+    #[test]
+    fn escapes_control_characters_without_escaping_unicode() {
+        assert_eq!(escape_text("café.md"), "café.md");
+        assert_eq!(escape_text("line\n\u{1b}[31m"), "line\\n\\u{1b}[31m");
+    }
 }
