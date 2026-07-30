@@ -1,8 +1,9 @@
+use crate::AnyResult;
+use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::model::{
     Commit, EvalAccumulator, EvalMetrics, EvalReport, GraphBuildConfig, OnDemandBackend,
     OnDemandConfig, RelatedGraph, ResultItem,
 };
-use crate::{AnyResult, build_graph_data, query_direct_from_commits};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub(crate) fn evaluate_global(
