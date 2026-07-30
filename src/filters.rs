@@ -1,7 +1,8 @@
+use crate::BROAD_CHANGE_EXCLUDE_SUGGESTION;
 use crate::cli::{ParsedArgs, flag_optional_string};
+use crate::graph::truncate_top_results;
 use crate::model::ResultItem;
 use crate::path_utils::path_basename;
-use crate::{BROAD_CHANGE_EXCLUDE_SUGGESTION, truncate_top_results};
 
 pub(crate) fn parse_exclude_patterns(parsed: &ParsedArgs) -> Vec<String> {
     let Some(value) = flag_optional_string(parsed, "exclude") else {
