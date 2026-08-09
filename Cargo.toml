@@ -7,7 +7,7 @@ repository = "https://github.com/ifapmzadu6/related-cli"
 
 [dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-gix = { version = "0.83", default-features = false, features = ["blob-diff", "max-performance-safe", "parallel", "revision", "sha1"] }
+gix = { version = "0.86", default-features = false, features = ["blob-diff", "max-performance-safe", "parallel", "revision", "sha1"] }
 memmap2 = "0.9"
 rayon = "1"
 rustc-hash = "2"
