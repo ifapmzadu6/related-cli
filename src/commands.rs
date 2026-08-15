@@ -51,7 +51,8 @@ pub(crate) fn run_with_writer<W: Write>(args: Vec<String>, out: &mut W) -> AnyRe
             writeln!(out, "related {}", env!("CARGO_PKG_VERSION"))?;
             Ok(())
         }
-        "help" | "-h" | "--help" => {
+        "help" => print_command_usage(args.get(1).map(String::as_str), out),
+        "-h" | "--help" => {
             print_usage(out)?;
             Ok(())
         }
@@ -75,7 +76,105 @@ The graph is built on demand from files that changed together in Git commits.
 No source parsing, imports, embeddings, or file contents are used.
 Relative file paths are resolved from --repo (or the current directory), and
 query targets must be tracked by Git. Eval defaults to the target-local
-on-demand query shape; use --query-shape global for the research graph."#
+on-demand query shape; use --query-shape global for the research graph.
+Run related <command> --help for command-specific options."#
+    )?;
+    Ok(())
+}
+
+fn print_command_usage<W: Write>(command: Option<&str>, out: &mut W) -> AnyResult<()> {
+    match command {
+        None => print_usage(out),
+        Some("query") => print_query_usage(out),
+        Some("explain") => print_explain_usage(out),
+        Some("diff") => print_diff_usage(out),
+        Some("eval") => print_eval_usage(out),
+        Some(other) => Err(format!("unknown command {other:?}").into()),
+    }
+}
+
+fn print_query_usage<W: Write>(out: &mut W) -> AnyResult<()> {
+    writeln!(
+        out,
+        r#"Usage: related query <file> [options]
+
+Options:
+  --repo PATH                 Repository or subdirectory (default: .)
+  --mode MODE                 direct, pagerank, path, or hot (default: direct)
+  --top N                     Maximum results (default: {DEFAULT_TOP})
+  --evidence N                Evidence commits per result (default: 0)
+  --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
+  --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
+  --since DATE                Restrict history by Git date expression
+  --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
+  --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
+  --jobs N                    Worker count for supported backends
+  --scan-commits N            Pack-walk scan limit (0 = backend default)
+  --exclude PATTERNS          Comma-separated path patterns to hide
+  -h, --help                  Show this help"#
+    )?;
+    Ok(())
+}
+
+fn print_explain_usage<W: Write>(out: &mut W) -> AnyResult<()> {
+    writeln!(
+        out,
+        r#"Usage: related explain <file-a> <file-b> [options]
+
+Options:
+  --repo PATH                 Repository or subdirectory (default: .)
+  --evidence N                Evidence commits to show (default: {DEFAULT_EVIDENCE})
+  --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
+  --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
+  --since DATE                Restrict history by Git date expression
+  --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
+  --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
+  --jobs N                    Worker count for supported backends
+  --scan-commits N            Pack-walk scan limit (0 = backend default)
+  -h, --help                  Show this help"#
+    )?;
+    Ok(())
+}
+
+fn print_diff_usage<W: Write>(out: &mut W) -> AnyResult<()> {
+    writeln!(
+        out,
+        r#"Usage: related diff [options]
+
+Options:
+  --staged                    Inspect staged changes instead of unstaged changes
+  --repo PATH                 Repository or subdirectory (default: .)
+  --mode MODE                 direct, pagerank, path, or hot (default: direct)
+  --top N                     Maximum results (default: {DEFAULT_TOP})
+  --evidence N                Evidence commits per result (default: 0)
+  --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
+  --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
+  --since DATE                Restrict history by Git date expression
+  --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
+  --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
+  --jobs N                    Worker count for supported backends
+  --scan-commits N            Pack-walk scan limit (0 = backend default)
+  --exclude PATTERNS          Comma-separated path patterns to hide
+  -h, --help                  Show this help"#
+    )?;
+    Ok(())
+}
+
+fn print_eval_usage<W: Write>(out: &mut W) -> AnyResult<()> {
+    writeln!(
+        out,
+        r#"Usage: related eval [options]
+
+Options:
+  --repo PATH                 Repository or subdirectory (default: .)
+  --query-shape SHAPE         on-demand or global (default: on-demand)
+  --test-commits N            Holdout commits (default: 200)
+  --train-commits N           Training commits (default: 1000)
+  --top N                     Evaluation cutoff (default: 10)
+  --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
+  --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
+  --modes MODES               Comma-separated ranking modes
+  -h, --help                  Show this help"#
     )?;
     Ok(())
 }
@@ -97,8 +196,11 @@ fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "scan-commits",
             "exclude",
         ],
-        &["on-demand"],
+        &["on-demand", "help", "h"],
     )?;
+    if flag_bool(&parsed, "help") || flag_bool(&parsed, "h") {
+        return print_query_usage(out);
+    }
     if parsed.positionals.len() != 1 {
         return Err("query requires exactly one file".into());
     }
@@ -125,9 +227,20 @@ fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<
         .into());
     }
     let query_top = filtered_query_top(top, &exclude_patterns);
-    let mut related = query_on_demand(root, &target, &mode, query_top, &config)?;
+    let (mut related, runtime_backend_hint) = with_default_pack_fallback(&mut config, |config| {
+        query_on_demand(root, &target, &mode, query_top, config)
+    })?;
     filter_related_results(&mut related, &exclude_patterns, top);
     let mut hints = query_hints(&related, &exclude_patterns);
+    if flag_bool(parsed, "on-demand") {
+        hints.insert(
+            0,
+            "--on-demand is redundant because query already runs on demand.".to_string(),
+        );
+    }
+    if let Some(hint) = runtime_backend_hint {
+        hints.insert(0, hint);
+    }
     if let Some(hint) = backend_hint {
         hints.insert(0, hint);
     }
@@ -323,8 +436,11 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "jobs",
             "scan-commits",
         ],
-        &[],
+        &["help", "h"],
     )?;
+    if flag_bool(&parsed, "help") || flag_bool(&parsed, "h") {
+        return print_explain_usage(out);
+    }
     if parsed.positionals.len() != 2 {
         return Err("explain requires exactly two files".into());
     }
@@ -334,13 +450,15 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let repo = RepoContext::discover(&repo)?;
     let root = repo.root_str()?;
     let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
-    let output = explain_relationship(
-        root,
-        &repo.input_base,
-        &parsed.positionals[0],
-        &parsed.positionals[1],
-        &config,
-    )?;
+    let (output, runtime_backend_hint) = with_default_pack_fallback(&mut config, |config| {
+        explain_relationship(
+            root,
+            &repo.input_base,
+            &parsed.positionals[0],
+            &parsed.positionals[1],
+            config,
+        )
+    })?;
 
     if !output.related {
         writeln!(
@@ -350,6 +468,9 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             escape_text(&output.b)
         )?;
         if let Some(hint) = backend_hint {
+            writeln!(out, "hint: {hint}")?;
+        }
+        if let Some(hint) = runtime_backend_hint {
             writeln!(out, "hint: {hint}")?;
         }
         return Ok(());
@@ -378,6 +499,9 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         )?;
     }
     if let Some(hint) = backend_hint {
+        writeln!(out, "hint: {hint}")?;
+    }
+    if let Some(hint) = runtime_backend_hint {
         writeln!(out, "hint: {hint}")?;
     }
     Ok(())
@@ -436,8 +560,11 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "scan-commits",
             "exclude",
         ],
-        &["staged"],
+        &["staged", "help", "h"],
     )?;
+    if flag_bool(&parsed, "help") || flag_bool(&parsed, "h") {
+        return print_diff_usage(out);
+    }
     if !parsed.positionals.is_empty() {
         return Err("diff does not accept positional arguments".into());
     }
@@ -461,8 +588,15 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let changed_set: HashSet<String> = changed.iter().cloned().collect();
     let mut aggregate: HashMap<String, ResultItem> = HashMap::default();
     let query_top = filtered_query_top(top, &exclude_patterns);
+    let mut runtime_backend_hint = None;
     for target in &changed {
-        for result in query_on_demand(root, target, &mode, query_top, &config)? {
+        let (results, hint) = with_default_pack_fallback(&mut config, |config| {
+            query_on_demand(root, target, &mode, query_top, config)
+        })?;
+        if runtime_backend_hint.is_none() {
+            runtime_backend_hint = hint;
+        }
+        for result in results {
             if changed_set.contains(&result.path) {
                 continue;
             }
@@ -476,6 +610,9 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let mut related: Vec<ResultItem> = aggregate.into_values().collect();
     filter_related_results(&mut related, &exclude_patterns, top);
     let mut hints = query_hints(&related, &exclude_patterns);
+    if let Some(hint) = runtime_backend_hint {
+        hints.insert(0, hint);
+    }
     if let Some(hint) = backend_hint {
         hints.insert(0, hint);
     }
@@ -529,8 +666,11 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "modes",
             "query-shape",
         ],
-        &[],
+        &["help", "h"],
     )?;
+    if flag_bool(&parsed, "help") || flag_bool(&parsed, "h") {
+        return print_eval_usage(out);
+    }
     if !parsed.positionals.is_empty() {
         return Err("eval does not accept positional arguments".into());
     }
@@ -622,6 +762,34 @@ fn configure_backend_for_repo(
     Ok(Some(format!(
         "Git object format {object_format} is not supported by pack-fast; used the git backend instead."
     )))
+}
+
+fn with_default_pack_fallback<T>(
+    config: &mut OnDemandConfig,
+    operation: impl Fn(&OnDemandConfig) -> AnyResult<T>,
+) -> AnyResult<(T, Option<String>)> {
+    match operation(config) {
+        Ok(value) => Ok((value, None)),
+        Err(pack_error)
+            if config.backend == OnDemandBackend::PackFast && !config.backend_explicit =>
+        {
+            config.backend = OnDemandBackend::GitCli;
+            match operation(config) {
+                Ok(value) => Ok((
+                    value,
+                    Some(
+                        "pack-fast could not read this repository; used the git backend instead."
+                            .to_string(),
+                    ),
+                )),
+                Err(git_error) => Err(format!(
+                    "pack-fast failed: {pack_error}; git fallback failed: {git_error}"
+                )
+                .into()),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn parse_on_demand_backend(value: &str) -> AnyResult<OnDemandBackend> {

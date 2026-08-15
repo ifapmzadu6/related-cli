@@ -20,7 +20,10 @@ pub(crate) fn filtered_query_top(top: usize, exclude_patterns: &[String]) -> usi
     if exclude_patterns.is_empty() {
         top
     } else {
-        top.saturating_mul(4).max(top.saturating_add(20))
+        // Every query backend has already collected its candidate set before it
+        // applies the top-K truncation. Keep that full set when exclusions are
+        // present so filtering cannot hide a valid lower-ranked result.
+        usize::MAX
     }
 }
 

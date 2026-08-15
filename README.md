@@ -117,10 +117,10 @@ The default backend, `pack-fast`, is optimized for low-latency agent calls in
 large repositories and may stop before an exact full history walk. Use
 `--history-backend git` when exact Git history is more important than speed, or
 `--history-backend pack-scan` for a deeper pack-only scan. The pack backends read
-SHA-1 object storage directly. On a repository using another Git object format,
-the default automatically falls back to `git`; an explicitly requested
-incompatible backend returns a clear error. The Git backend is path-exact but
-does not follow file renames.
+SHA-1 object storage directly. If the default cannot read a repository's object
+format or storage layout, it automatically falls back to `git`; an explicitly
+requested incompatible backend returns a clear error. The Git backend is
+path-exact but does not follow file renames.
 
 If the top results all look like broad release, dependency, formatting, or
 initial-commit churn, inspect evidence and retry with a tighter commit-size

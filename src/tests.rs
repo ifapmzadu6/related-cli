@@ -208,6 +208,42 @@ fn cli_rejects_json_flag() {
 }
 
 #[test]
+fn cli_subcommands_provide_help_without_repository_access() {
+    for command in ["query", "explain", "diff", "eval"] {
+        let mut output = Vec::new();
+        run_with_writer(vec![command.to_string(), "--help".to_string()], &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.starts_with(&format!("Usage: related {command}")));
+        assert!(text.contains("-h, --help"));
+    }
+}
+
+#[test]
+fn cli_deprecated_on_demand_flag_remains_compatible() {
+    let repo = new_test_repo();
+    write_commit(&repo, "pair", &[("a.md", "a\n"), ("b.md", "b\n")]);
+    let mut output = Vec::new();
+    run_with_writer(
+        vec![
+            "query".to_string(),
+            "a.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--history-backend".to_string(),
+            "git".to_string(),
+            "--on-demand".to_string(),
+        ],
+        &mut output,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("1 b.md co=1"));
+    assert!(text.contains("--on-demand is redundant"));
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
 fn cli_default_text_output_is_compact() {
     let repo = new_test_repo();
     write_commit(&repo, "pair", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
@@ -432,6 +468,57 @@ fn default_backend_falls_back_for_sha256_repositories() {
 }
 
 #[test]
+fn default_backend_falls_back_when_pack_storage_is_unavailable() {
+    let source = new_test_repo();
+    write_commit(&source, "pair", &[("a.md", "a\n"), ("b.md", "b\n")]);
+    let shared = temp_dir();
+    let output = Command::new("git")
+        .args(["clone", "--quiet", "--shared"])
+        .arg(&source)
+        .arg(&shared)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git clone --shared failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut output = Vec::new();
+    run_with_writer(
+        vec![
+            "query".to_string(),
+            "a.md".to_string(),
+            "--repo".to_string(),
+            shared.display().to_string(),
+        ],
+        &mut output,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("related a.md direct:on-demand:GitCli\n"));
+    assert!(text.contains("1 b.md co=1"));
+    assert!(text.contains("pack-fast could not read this repository; used the git backend"));
+
+    let explicit_pack = run_with_writer(
+        vec![
+            "query".to_string(),
+            "a.md".to_string(),
+            "--repo".to_string(),
+            shared.display().to_string(),
+            "--history-backend".to_string(),
+            "pack-fast".to_string(),
+        ],
+        &mut Vec::new(),
+    );
+    assert!(explicit_pack.is_err());
+
+    fs::remove_dir_all(shared).ok();
+    fs::remove_dir_all(source).ok();
+}
+
+#[test]
 fn diff_aggregation_merges_metadata_and_deduplicates_evidence() {
     fn evidence(hash: &str, date: &str) -> Evidence {
         Evidence {
@@ -570,6 +657,44 @@ fn cli_query_supports_exclude_patterns() {
     assert!(!text.contains("package-lock.json"));
     assert!(!text.contains("pnpm-lock.yaml"));
     assert!(!text.contains("bun.lockb"));
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn cli_exclusions_do_not_hide_lower_ranked_results() {
+    let repo = new_test_repo();
+    fs::write(repo.join("target.md"), "target\n").unwrap();
+    fs::write(repo.join("z-keep.md"), "keep\n").unwrap();
+    for idx in 1..=25 {
+        fs::write(repo.join(format!("{idx:02}.lock")), "lock\n").unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &["commit", "-m", "many lockfiles and one useful file"],
+    );
+
+    let mut output = Vec::new();
+    run_with_writer(
+        vec![
+            "query".to_string(),
+            "target.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--history-backend".to_string(),
+            "git".to_string(),
+            "--top".to_string(),
+            "1".to_string(),
+            "--exclude".to_string(),
+            "*.lock".to_string(),
+        ],
+        &mut output,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("1 z-keep.md co=1"));
+    assert!(!text.contains("no related files found"));
 
     fs::remove_dir_all(repo).ok();
 }
