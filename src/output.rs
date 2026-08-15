@@ -11,6 +11,9 @@ pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Re
     )?;
     if output.related.is_empty() {
         writeln!(out, "no related files found")?;
+        for hint in &output.hints {
+            writeln!(out, "hint: {hint}")?;
+        }
         return Ok(());
     }
     for (idx, item) in output.related.iter().enumerate() {
@@ -124,11 +127,26 @@ pub(crate) fn escape_text(value: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_text;
+    use super::{escape_text, print_query};
+    use crate::model::QueryOutput;
 
     #[test]
     fn escapes_control_characters_without_escaping_unicode() {
         assert_eq!(escape_text("café.md"), "café.md");
         assert_eq!(escape_text("line\n\u{1b}[31m"), "line\\n\\u{1b}[31m");
+    }
+
+    #[test]
+    fn empty_query_output_keeps_hints() {
+        let output = QueryOutput {
+            target: "a.md".to_string(),
+            mode: "direct".to_string(),
+            related: Vec::new(),
+            hints: vec!["used fallback".to_string()],
+        };
+        let mut text = Vec::new();
+        print_query(&mut text, &output).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        assert!(text.contains("no related files found\nhint: used fallback\n"));
     }
 }

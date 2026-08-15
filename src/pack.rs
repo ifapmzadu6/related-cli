@@ -1716,8 +1716,12 @@ fn read_pack_object_from_bytes(pack: &[u8], offset: u64) -> AnyResult<PackedRawO
     let mut byte = first;
     while byte & 0x80 != 0 {
         byte = read_pack_byte(pack, &mut pos)?;
-        size |= ((byte & 0x7f) as u64) << shift;
-        shift += 7;
+        let factor = 1u64.checked_shl(shift).ok_or("pack object size overflow")?;
+        let part = u64::from(byte & 0x7f)
+            .checked_mul(factor)
+            .ok_or("pack object size overflow")?;
+        size = size.checked_add(part).ok_or("pack object size overflow")?;
+        shift = shift.checked_add(7).ok_or("pack object size overflow")?;
     }
     let base = match type_code {
         6 => Some(PackedBase::Offset(read_ofs_delta_base_offset_from_bytes(
@@ -1768,7 +1772,11 @@ fn read_ofs_delta_base_offset_from_bytes(
     let mut distance = (byte & 0x7f) as u64;
     while byte & 0x80 != 0 {
         byte = read_pack_byte(pack, pos)?;
-        distance = ((distance + 1) << 7) | ((byte & 0x7f) as u64);
+        distance = distance
+            .checked_add(1)
+            .and_then(|value| value.checked_mul(128))
+            .and_then(|value| value.checked_add(u64::from(byte & 0x7f)))
+            .ok_or("ofs-delta distance overflow")?;
     }
     object_offset
         .checked_sub(distance)
@@ -1786,7 +1794,9 @@ fn apply_pack_delta(base: &[u8], delta: &[u8]) -> AnyResult<Vec<u8>> {
         )
         .into());
     }
-    let mut out = Vec::with_capacity(target_size);
+    let mut out = Vec::new();
+    out.try_reserve_exact(target_size)
+        .map_err(|err| format!("delta target size is too large: {err}"))?;
     while pos < delta.len() {
         let opcode = delta[pos];
         pos += 1;
@@ -1838,15 +1848,19 @@ fn apply_pack_delta(base: &[u8], delta: &[u8]) -> AnyResult<Vec<u8>> {
 }
 
 fn read_delta_varint(data: &[u8], pos: &mut usize) -> AnyResult<usize> {
-    let mut shift = 0usize;
+    let mut shift = 0u32;
     let mut out = 0usize;
     loop {
         let byte = read_delta_byte(data, pos)?;
-        out |= ((byte & 0x7f) as usize) << shift;
+        let factor = 1usize.checked_shl(shift).ok_or("delta varint overflow")?;
+        let part = usize::from(byte & 0x7f)
+            .checked_mul(factor)
+            .ok_or("delta varint overflow")?;
+        out = out.checked_add(part).ok_or("delta varint overflow")?;
         if byte & 0x80 == 0 {
             return Ok(out);
         }
-        shift += 7;
+        shift = shift.checked_add(7).ok_or("delta varint overflow")?;
     }
 }
 
@@ -1952,5 +1966,17 @@ mod tests {
             git_tree_name_cmp(b"foo", false, b"foo", false),
             std::cmp::Ordering::Equal
         );
+    }
+
+    #[test]
+    fn malformed_pack_varints_return_errors() {
+        let oversized = vec![0xff; 32];
+        assert!(read_pack_object_from_bytes(&oversized, 0).is_err());
+
+        let mut pos = 0;
+        assert!(read_ofs_delta_base_offset_from_bytes(&oversized, &mut pos, u64::MAX).is_err());
+
+        let mut pos = 0;
+        assert!(read_delta_varint(&oversized, &mut pos).is_err());
     }
 }

@@ -92,6 +92,12 @@ jobs:
       - name: Build release binary
         shell: bash
         run: cargo build --release --locked --target "${{ matrix.target }}"
+      - name: Smoke test release binary
+        shell: bash
+        run: |
+          BINARY="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          ACTUAL_VERSION="$("$BINARY" --version | tr -d '\r')"
+          test "$ACTUAL_VERSION" = "related ${{ needs.validate.outputs.version }}"
       - name: Stage npm and release artifacts
         shell: bash
         run: |
@@ -186,6 +192,12 @@ jobs:
           node npm/scripts/verify-prebuilt.js
           npm pack --dry-run
           npm pack
+      - name: Smoke test npm package
+        shell: bash
+        run: |
+          VERSION="${{ needs.validate.outputs.version }}"
+          ACTUAL_VERSION="$(npx --yes --package "./related-cli-$VERSION.tgz" related --version)"
+          test "$ACTUAL_VERSION" = "related $VERSION"
       - name: Upload npm package tarball
         uses: actions/upload-artifact@v4
         with:
