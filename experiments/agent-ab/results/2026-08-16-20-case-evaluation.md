@@ -5,7 +5,8 @@
 Do not make `related` a mandatory step for every agent task. In this evaluation
 it did not improve target-file discovery accuracy, and it increased resource
 use. Keep it as an optional context-expansion tool when the full companion-file
-scope is uncertain.
+scope is uncertain, and as a pre-commit or pre-PR changed-set audit for missed
+companion updates.
 
 The current skill was tightened accordingly: skip history when explicit targets
 and direct search already resolve the edit set; otherwise run one seed query,
@@ -112,12 +113,15 @@ The best current product policy is:
 
 - Use `related` when a task starts from one or a few files and likely companion
   tests, configs, docs, migrations, or platform equivalents are not yet known.
+- Before a commit or PR, use one changed-set query to look for missed docs,
+  tests, configs, migrations, generated metadata, or platform counterparts.
 - Skip it when the complete target set is explicit and direct search resolves
   that set.
 - Treat rankings as candidates, never as an authoritative edit plan.
 - Verify explicit task nouns directly and use tests as the semantic authority.
 - Measure future gains on under-specified issue tasks, additional repositories,
-  multiple agent runs, and stronger hidden acceptance tests.
+  multiple agent runs, stronger hidden acceptance tests, and pre-PR omission
+  detection. The present benchmark did not measure the last use case.
 
 ## Reproduction
 

@@ -1,6 +1,6 @@
 ---
 name: find-related-files
-description: Find likely companion files from Git co-change history when an editing or review task starts from one or a few files and the full file scope is uncertain. Use to discover non-obvious tests, configs, docs, migrations, or platform counterparts before editing. Skip when the task already names the complete target set and direct path or text search resolves it.
+description: Find likely companion files from Git co-change history when an editing or review task starts from one or a few files and the full file scope is uncertain. Use to discover non-obvious tests, configs, docs, migrations, or platform counterparts, and before a commit or PR to audit the changed set for missed companion updates. Skip pre-edit history when the task already names the complete target set and direct path or text search resolves it.
 ---
 
 # Find Related Files
@@ -11,7 +11,8 @@ Use `related-cli` as a lightweight context expansion step when the likely edit
 scope is incomplete. It ranks files that changed together in Git history, so it
 can surface tests, configs, docs, migrations, and companion code that text
 search may miss. If the task already identifies the complete edit set and
-direct search resolves it, skip the history query.
+direct search resolves it, skip the pre-edit history query. A single changed-set
+query can still be useful before a commit or PR as a completeness audit.
 
 ## Workflow
 
@@ -20,22 +21,35 @@ layers, and tests. Search paths or source text for every explicit target. Use
 history only when companion-file scope remains uncertain.
 Explicit task requirements override the ranking.
 
-Run from the repository root when possible:
+## Pre-commit and pre-PR audit
+
+Before committing or opening a PR, aggregate the current changed set once. Use
+the first form for unstaged edits and the second for staged edits:
+
+```sh
+env npm_config_loglevel=error npx -y --package related-cli@latest related diff --top 20
+env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20
+```
+
+Do not query every changed file separately. Compare the candidates with the task
+and current diff, then directly inspect likely omissions such as documentation,
+tests, configuration, generated metadata, migrations, and cross-platform
+counterparts. A ranking alone is not a reason to edit a file. If both staged and
+unstaged changes exist, audit each set once.
+
+## Query discipline
+
+For a seed-file lookup, run:
 
 ```sh
 env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20
 ```
 
-Use `--repo PATH` only when querying another checkout from outside that repo:
+Run from the repository root when possible. Use `--repo PATH` only when querying
+another checkout from outside that repository:
 
 ```sh
 env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --repo /path/to/repo --top 20
-```
-
-For staged edits, ask for related files for the changed set:
-
-```sh
-env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20
 ```
 
 Run the seed query once. Do not repeat an identical query. Then use direct path
