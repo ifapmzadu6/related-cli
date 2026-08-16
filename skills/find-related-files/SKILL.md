@@ -14,6 +14,10 @@ that text search may miss.
 
 ## Workflow
 
+Extract the explicit task scope before using history: named components, screens,
+platforms, layers, and tests. Search paths or source text for every explicit
+target. Explicit task requirements override the ranking.
+
 Run from the repository root when possible:
 
 ```sh
@@ -32,8 +36,15 @@ For staged edits, ask for related files for the changed set:
 env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20
 ```
 
-Open the strongest relevant results before making edits. Treat the ranking as a
-context hint, not proof that a file must change.
+When a task spans independent concepts or surfaces, query one representative
+anchor for each instead of relying on a single seed file. Open the strongest
+relevant results before making edits, but treat them only as additional
+discovery candidates:
+
+- Do not drop an explicit target because it is absent from the ranking.
+- Do not substitute a similarly named result for a requested target.
+- Edit a candidate only after the task, direct references, or tests confirm it.
+- Recheck every explicit target and run relevant tests before finishing.
 
 If the output includes `hint:` lines, follow them before opening many files. Add
 `--evidence N` when another tool needs example commits behind the ranking.

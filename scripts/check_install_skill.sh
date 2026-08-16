@@ -22,6 +22,7 @@ check_installer() {
   test -f "$project/.agents/skills/find-related-files/SKILL.md"
   grep -qF "related-cli@$VERSION related query" "$project/.agents/skills/find-related-files/SKILL.md"
   grep -qF "related-cli@latest related-install-skill" "$project/.agents/skills/find-related-files/SKILL.md"
+  grep -qF "Explicit task requirements override the ranking." "$project/.agents/skills/find-related-files/SKILL.md"
 
   (cd "$project" && "$@" codex >/dev/null)
   test -f "$project/.agents/skills/find-related-files/SKILL.md"
@@ -29,6 +30,7 @@ check_installer() {
   (cd "$project" && "$@" claude >/dev/null)
   test -f "$project/.claude/skills/find-related-files/SKILL.md"
   grep -qF "related-cli@$VERSION related query" "$project/.claude/skills/find-related-files/SKILL.md"
+  grep -qF "Explicit task requirements override the ranking." "$project/.claude/skills/find-related-files/SKILL.md"
 
   env HOME="$tmp/$label-codex-home" "$@" --user >/dev/null
   test -f "$tmp/$label-codex-home/.agents/skills/find-related-files/SKILL.md"
