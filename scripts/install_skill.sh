@@ -16,6 +16,7 @@ EOF
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 skill_src="$repo_root/skills/find-related-files"
+package_version="$(sed -n 's/^  "version": "\([^"]*\)",$/\1/p' "$repo_root/package.json" | head -1)"
 agent="codex"
 scope="project"
 
@@ -61,6 +62,10 @@ if [[ ! -f "$skill_src/SKILL.md" ]]; then
   echo "missing skill source: $skill_src" >&2
   exit 1
 fi
+if [[ -z "$package_version" ]]; then
+  echo "could not read package version from $repo_root/package.json" >&2
+  exit 1
+fi
 
 dest_parent="$(dirname "$dest")"
 dest_name="$(basename "$dest")"
@@ -78,6 +83,16 @@ cleanup() {
 trap cleanup EXIT
 
 cp -R "$skill_src/." "$tmp/"
+skill_file="$tmp/SKILL.md"
+awk -v package_ref="related-cli@$package_version" '
+  /related (query|diff)/ { gsub(/related-cli@latest/, package_ref) }
+  { print }
+' "$skill_file" > "$skill_file.pinned"
+if cmp -s "$skill_file" "$skill_file.pinned"; then
+  echo "missing runtime package reference in $skill_file" >&2
+  exit 1
+fi
+mv "$skill_file.pinned" "$skill_file"
 if [[ -e "$dest" || -L "$dest" ]]; then
   backup="$(mktemp -d "$dest_parent/.${dest_name}.backup.XXXXXX")"
   rmdir "$backup"

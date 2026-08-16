@@ -1,7 +1,7 @@
 use crate::graph::time_decay;
 use crate::history::{format_gix_time, parse_gix_since};
 use crate::model::*;
-use crate::path_utils::normalize_git_path;
+use crate::path_utils::{decode_git_path, normalize_git_path};
 use crate::{AnyResult, DEFAULT_HALF_LIFE_DAYS, DEFAULT_MAX_FILES};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -17,6 +17,15 @@ const PACK_FAST_MIN_SCAN_COMMITS: usize = 1_000;
 const PACK_FAST_MIN_TARGET_COMMITS: usize = 256;
 const PACK_FAST_STALL_COMMITS: usize = 5_000;
 const PACK_DIRECT_PARALLEL_MIN_COMMITS: usize = 256;
+const MAX_GIT_OBJECT_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_PACK_DELTA_DEPTH: usize = 128;
+const MAX_TREE_DIFF_DEPTH: usize = 256;
+const MAX_OBJECT_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_OBJECT_CACHE_ENTRIES: usize = 16_384;
+const MAX_COMMIT_CACHE_ENTRIES: usize = 32_768;
+const MAX_TREE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TREE_CACHE_ENTRIES: usize = 8_192;
+const MAX_PATH_CACHE_ENTRIES: usize = 65_536;
 
 pub(crate) fn git_log_for_target_pack_scan(
     repo: &str,
@@ -641,12 +650,14 @@ impl PackTargetPath {
         let mut found = None;
         for idx in 0..self.components.len() {
             let Some(entry) = self.child_entry(store, current, idx)? else {
+                reset_entry_cache_if_full(&mut self.entry_cache);
                 self.entry_cache.insert(tree_id, None);
                 return Ok(None);
             };
             current = entry.id;
             found = Some(entry);
         }
+        reset_entry_cache_if_full(&mut self.entry_cache);
         self.entry_cache.insert(tree_id, found);
         Ok(found)
     }
@@ -662,6 +673,9 @@ impl PackTargetPath {
             return Ok(*entry);
         }
         let entry = store.find_tree_child_entry(tree_id, &self.components[component_idx])?;
+        if self.child_cache.len() >= MAX_PATH_CACHE_ENTRIES {
+            self.child_cache.clear();
+        }
         self.child_cache.insert(key, entry);
         Ok(entry)
     }
@@ -703,6 +717,12 @@ impl PackTargetPath {
             }
         }
         Ok((true, false))
+    }
+}
+
+fn reset_entry_cache_if_full(cache: &mut HashMap<RawObjectId, Option<RawTreeEntry>>) {
+    if cache.len() >= MAX_PATH_CACHE_ENTRIES {
+        cache.clear();
     }
 }
 
@@ -811,6 +831,8 @@ fn pack_changed_files_for_commit_into(
     files.clear();
     prefix.clear();
     if commit.parents.len() > 1 {
+        // Match `git log --full-diff --name-only` without `-m`, which does not
+        // emit a per-parent file list for merge commits.
         return Ok(());
     }
     let old_tree = commit
@@ -837,6 +859,20 @@ fn pack_diff_trees(
     out: &mut Vec<String>,
     file_limit: Option<usize>,
 ) -> AnyResult<()> {
+    pack_diff_trees_at_depth(store, old_tree, new_tree, prefix, out, file_limit, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_diff_trees_at_depth(
+    store: &mut RawGitStore,
+    old_tree: Option<RawObjectId>,
+    new_tree: Option<RawObjectId>,
+    prefix: &mut Vec<u8>,
+    out: &mut Vec<String>,
+    file_limit: Option<usize>,
+    depth: usize,
+) -> AnyResult<()> {
+    validate_tree_diff_depth(depth)?;
     if file_limit.is_some_and(|limit| out.len() > limit) {
         return Ok(());
     }
@@ -885,9 +921,17 @@ fn pack_diff_trees(
             let old_child = old_entry
                 .filter(raw_tree_entry_is_tree)
                 .map(|entry| entry.id);
-            pack_diff_trees(store, old_child, Some(entry.id), prefix, out, file_limit)?;
+            pack_diff_trees_at_depth(
+                store,
+                old_child,
+                Some(entry.id),
+                prefix,
+                out,
+                file_limit,
+                depth + 1,
+            )?;
         } else {
-            out.push(String::from_utf8_lossy(prefix).into_owned());
+            out.push(decode_git_path(prefix)?);
         }
         prefix.truncate(prefix_len);
         if file_limit.is_some_and(|limit| out.len() > limit) {
@@ -1070,9 +1114,12 @@ struct RawGitStore {
     indexes: Arc<[PackIndex]>,
     loose_prefixes: [bool; 256],
     object_cache: HashMap<RawObjectId, RawGitObject>,
+    object_cache_bytes: usize,
     commit_cache: HashMap<RawObjectId, RawCommit>,
     tree_entries_cache: HashMap<RawObjectId, Arc<[RawNamedTreeEntry]>>,
+    tree_entries_cache_bytes: usize,
     offset_cache: HashMap<(usize, u64), RawGitObject>,
+    offset_cache_bytes: usize,
     pack_maps: Vec<Option<Arc<memmap2::Mmap>>>,
 }
 
@@ -1094,9 +1141,12 @@ impl RawGitStore {
             indexes,
             loose_prefixes,
             object_cache: HashMap::default(),
+            object_cache_bytes: 0,
             commit_cache: HashMap::default(),
             tree_entries_cache: HashMap::default(),
+            tree_entries_cache_bytes: 0,
             offset_cache: HashMap::default(),
+            offset_cache_bytes: 0,
         })
     }
 
@@ -1109,9 +1159,12 @@ impl RawGitStore {
             indexes: Arc::clone(&self.indexes),
             loose_prefixes: self.loose_prefixes,
             object_cache: HashMap::default(),
+            object_cache_bytes: 0,
             commit_cache: HashMap::default(),
             tree_entries_cache: HashMap::default(),
+            tree_entries_cache_bytes: 0,
             offset_cache: HashMap::default(),
+            offset_cache_bytes: 0,
         }
     }
 
@@ -1151,6 +1204,9 @@ impl RawGitStore {
             }
             parse_raw_commit(&object.data)?
         };
+        if self.commit_cache.len() >= MAX_COMMIT_CACHE_ENTRIES {
+            self.commit_cache.clear();
+        }
         self.commit_cache.insert(id, commit.clone());
         Ok(commit)
     }
@@ -1187,19 +1243,31 @@ impl RawGitStore {
             parse_tree_entries(&object.data)?
         };
         let entries: Arc<[RawNamedTreeEntry]> = entries.into();
+        let entries_bytes = entries
+            .iter()
+            .fold(std::mem::size_of_val(entries.as_ref()), |total, entry| {
+                total.saturating_add(entry.name.len())
+            });
+        if cache_needs_reset(
+            self.tree_entries_cache_bytes,
+            entries_bytes,
+            self.tree_entries_cache.len(),
+            MAX_TREE_CACHE_ENTRIES,
+            MAX_TREE_CACHE_BYTES,
+        ) {
+            self.tree_entries_cache.clear();
+            self.tree_entries_cache_bytes = 0;
+        }
+        self.tree_entries_cache_bytes = self.tree_entries_cache_bytes.saturating_add(entries_bytes);
         self.tree_entries_cache
             .insert(tree_id, Arc::clone(&entries));
         Ok(entries)
     }
 
-    fn find_object(&mut self, id: RawObjectId) -> AnyResult<RawGitObject> {
-        Ok(self.find_object_ref(id)?.clone())
-    }
-
     fn find_object_ref(&mut self, id: RawObjectId) -> AnyResult<&RawGitObject> {
         if !self.object_cache.contains_key(&id) {
-            let object = self.load_object(id)?;
-            self.object_cache.insert(id, object);
+            let object = self.load_object_at_delta_depth(id, 0)?;
+            self.cache_object(id, object);
         }
         match self.object_cache.get(&id) {
             Some(object) => Ok(object),
@@ -1207,11 +1275,43 @@ impl RawGitStore {
         }
     }
 
-    fn load_object(&mut self, id: RawObjectId) -> AnyResult<RawGitObject> {
+    fn find_object_at_delta_depth(
+        &mut self,
+        id: RawObjectId,
+        depth: usize,
+    ) -> AnyResult<RawGitObject> {
+        if let Some(object) = self.object_cache.get(&id) {
+            return Ok(object.clone());
+        }
+        let object = self.load_object_at_delta_depth(id, depth)?;
+        self.cache_object(id, object.clone());
+        Ok(object)
+    }
+
+    fn cache_object(&mut self, id: RawObjectId, object: RawGitObject) {
+        if cache_needs_reset(
+            self.object_cache_bytes,
+            object.data.len(),
+            self.object_cache.len(),
+            MAX_OBJECT_CACHE_ENTRIES,
+            MAX_OBJECT_CACHE_BYTES,
+        ) {
+            self.object_cache.clear();
+            self.object_cache_bytes = 0;
+        }
+        self.object_cache_bytes = self.object_cache_bytes.saturating_add(object.data.len());
+        self.object_cache.insert(id, object);
+    }
+
+    fn load_object_at_delta_depth(
+        &mut self,
+        id: RawObjectId,
+        depth: usize,
+    ) -> AnyResult<RawGitObject> {
         Ok(if let Some(object) = self.find_loose_object(id)? {
             object
         } else if let Some((pack_index, offset)) = self.find_pack_offset(id) {
-            self.find_pack_object_at(pack_index, offset)?
+            self.find_pack_object_at_depth(pack_index, offset, depth)?
         } else {
             return Err(format!("object {} not found", id.to_hex()).into());
         })
@@ -1236,25 +1336,50 @@ impl RawGitStore {
             return Ok(None);
         }
         let file = File::open(path)?;
-        let mut decoder = flate2::read::ZlibDecoder::new(file);
+        let decoder = flate2::read::ZlibDecoder::new(file);
         let mut inflated = Vec::new();
-        decoder.read_to_end(&mut inflated)?;
+        decoder
+            .take(MAX_GIT_OBJECT_BYTES.saturating_add(1024).saturating_add(1))
+            .read_to_end(&mut inflated)?;
+        if inflated.len() as u64 > MAX_GIT_OBJECT_BYTES.saturating_add(1024) {
+            return Err(format!(
+                "loose object {} exceeds the supported size limit of {MAX_GIT_OBJECT_BYTES} bytes",
+                id.to_hex()
+            )
+            .into());
+        }
         let Some(header_end) = inflated.iter().position(|byte| *byte == 0) else {
             return Err("loose object missing header delimiter".into());
         };
         let header = std::str::from_utf8(&inflated[..header_end])?;
-        let kind = header
+        let (kind, declared_size) = header
             .split_once(' ')
-            .map(|(kind, _)| raw_kind_from_name(kind))
-            .transpose()?
-            .ok_or("loose object missing kind")?;
+            .ok_or("loose object header must contain kind and size")?;
+        let kind = raw_kind_from_name(kind)?;
+        let declared_size: u64 = declared_size.parse()?;
+        validate_git_object_size(declared_size, "loose object")?;
+        let data_start = header_end + 1;
+        let data_len = inflated.len() - data_start;
+        if data_len as u64 != declared_size {
+            return Err(format!(
+                "loose object size mismatch: expected {declared_size}, got {}",
+                data_len
+            )
+            .into());
+        }
+        inflated.drain(..data_start);
         Ok(Some(RawGitObject {
             kind,
-            data: inflated[header_end + 1..].to_vec().into(),
+            data: inflated.into(),
         }))
     }
 
-    fn find_pack_object_at(&mut self, pack_index: usize, offset: u64) -> AnyResult<RawGitObject> {
+    fn find_pack_object_at_depth(
+        &mut self,
+        pack_index: usize,
+        offset: u64,
+        depth: usize,
+    ) -> AnyResult<RawGitObject> {
         let cache_key = (pack_index, offset);
         if let Some(object) = self.offset_cache.get(&cache_key) {
             return Ok(object.clone());
@@ -1281,11 +1406,14 @@ impl RawGitStore {
                 let Some(base) = raw.base else {
                     return Err("delta object missing base".into());
                 };
+                let base_depth = next_pack_delta_depth(depth)?;
                 let base = match base {
                     PackedBase::Offset(base_offset) => {
-                        self.find_pack_object_at(pack_index, base_offset)?
+                        self.find_pack_object_at_depth(pack_index, base_offset, base_depth)?
                     }
-                    PackedBase::Id(base_id) => self.find_object(base_id)?,
+                    PackedBase::Id(base_id) => {
+                        self.find_object_at_delta_depth(base_id, base_depth)?
+                    }
                 };
                 RawGitObject {
                     kind: base.kind,
@@ -1294,6 +1422,17 @@ impl RawGitStore {
             }
             other => return Err(format!("unsupported pack object type {other}").into()),
         };
+        if cache_needs_reset(
+            self.offset_cache_bytes,
+            object.data.len(),
+            self.offset_cache.len(),
+            MAX_OBJECT_CACHE_ENTRIES,
+            MAX_OBJECT_CACHE_BYTES,
+        ) {
+            self.offset_cache.clear();
+            self.offset_cache_bytes = 0;
+        }
+        self.offset_cache_bytes = self.offset_cache_bytes.saturating_add(object.data.len());
         self.offset_cache.insert(cache_key, object.clone());
         Ok(object)
     }
@@ -1317,6 +1456,36 @@ impl RawGitStore {
     }
 }
 
+fn cache_needs_reset(
+    current_bytes: usize,
+    incoming_bytes: usize,
+    entries: usize,
+    max_entries: usize,
+    max_bytes: usize,
+) -> bool {
+    entries >= max_entries || current_bytes.saturating_add(incoming_bytes) > max_bytes
+}
+
+fn next_pack_delta_depth(depth: usize) -> AnyResult<usize> {
+    let next = depth.checked_add(1).ok_or("pack delta depth overflow")?;
+    if next > MAX_PACK_DELTA_DEPTH {
+        return Err(format!(
+            "pack delta chain exceeds the supported depth of {MAX_PACK_DELTA_DEPTH}"
+        )
+        .into());
+    }
+    Ok(next)
+}
+
+fn validate_tree_diff_depth(depth: usize) -> AnyResult<()> {
+    if depth > MAX_TREE_DIFF_DEPTH {
+        return Err(
+            format!("Git tree depth exceeds the supported limit of {MAX_TREE_DIFF_DEPTH}").into(),
+        );
+    }
+    Ok(())
+}
+
 struct PackIndex {
     pack_path: PathBuf,
     data: Vec<u8>,
@@ -1330,6 +1499,10 @@ struct PackIndex {
 impl PackIndex {
     fn open(idx_path: PathBuf) -> AnyResult<Self> {
         let data = fs::read(&idx_path)?;
+        Self::from_data(idx_path, data)
+    }
+
+    fn from_data(idx_path: PathBuf, data: Vec<u8>) -> AnyResult<Self> {
         if data.len() < 8 + 256 * 4 {
             return Err(format!("idx file too small: {}", idx_path.display()).into());
         }
@@ -1343,12 +1516,31 @@ impl PackIndex {
         for (idx, slot) in fanout.iter_mut().enumerate() {
             *slot = read_be_u32(&data, 8 + idx * 4)?;
         }
+        if fanout.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err(format!("non-monotonic idx fanout: {}", idx_path.display()).into());
+        }
         let count = fanout[255] as usize;
-        let names_start = 8 + 256 * 4;
-        let crc_start = names_start + count * 20;
-        let offsets_start = crc_start + count * 4;
-        let large_offsets_start = offsets_start + count * 4;
-        if data.len() < large_offsets_start + 40 {
+        let names_start: usize = 8 + 256 * 4;
+        let names_bytes = count
+            .checked_mul(20)
+            .ok_or("idx name table size overflow")?;
+        let crc_bytes = count.checked_mul(4).ok_or("idx CRC table size overflow")?;
+        let offsets_bytes = count
+            .checked_mul(4)
+            .ok_or("idx offset table size overflow")?;
+        let crc_start = names_start
+            .checked_add(names_bytes)
+            .ok_or("idx name table offset overflow")?;
+        let offsets_start = crc_start
+            .checked_add(crc_bytes)
+            .ok_or("idx CRC table offset overflow")?;
+        let large_offsets_start = offsets_start
+            .checked_add(offsets_bytes)
+            .ok_or("idx offset table offset overflow")?;
+        let minimum_size = large_offsets_start
+            .checked_add(40)
+            .ok_or("idx trailer offset overflow")?;
+        if data.len() < minimum_size {
             return Err(format!("truncated idx file: {}", idx_path.display()).into());
         }
         let pack_path = idx_path.with_extension("pack");
@@ -1723,6 +1915,7 @@ fn read_pack_object_from_bytes(pack: &[u8], offset: u64) -> AnyResult<PackedRawO
         size = size.checked_add(part).ok_or("pack object size overflow")?;
         shift = shift.checked_add(7).ok_or("pack object size overflow")?;
     }
+    validate_git_object_size(size, "pack object")?;
     let base = match type_code {
         6 => Some(PackedBase::Offset(read_ofs_delta_base_offset_from_bytes(
             pack, &mut pos, offset,
@@ -1735,15 +1928,34 @@ fn read_pack_object_from_bytes(pack: &[u8], offset: u64) -> AnyResult<PackedRawO
         }
         _ => None,
     };
-    let mut decoder =
+    let decoder =
         flate2::bufread::ZlibDecoder::new(pack.get(pos..).ok_or("truncated pack object")?);
     let mut data = Vec::with_capacity(size.min(1024 * 1024) as usize);
-    decoder.read_to_end(&mut data)?;
+    decoder
+        .take(size.saturating_add(1))
+        .read_to_end(&mut data)?;
+    if data.len() as u64 != size {
+        return Err(format!(
+            "pack object size mismatch: expected {size}, got {}",
+            data.len()
+        )
+        .into());
+    }
     Ok(PackedRawObject {
         type_code,
         base,
         data,
     })
+}
+
+fn validate_git_object_size(size: u64, context: &str) -> AnyResult<()> {
+    if size > MAX_GIT_OBJECT_BYTES {
+        return Err(format!(
+            "{context} declares {size} bytes, exceeding the supported limit of {MAX_GIT_OBJECT_BYTES} bytes"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn read_pack_byte(pack: &[u8], pos: &mut usize) -> AnyResult<u8> {
@@ -1787,6 +1999,7 @@ fn apply_pack_delta(base: &[u8], delta: &[u8]) -> AnyResult<Vec<u8>> {
     let mut pos = 0usize;
     let source_size = read_delta_varint(delta, &mut pos)?;
     let target_size = read_delta_varint(delta, &mut pos)?;
+    validate_git_object_size(u64::try_from(target_size)?, "delta target")?;
     if source_size != base.len() {
         return Err(format!(
             "delta source size mismatch: expected {source_size}, got {}",
@@ -1944,9 +2157,26 @@ fn pack_direct_scored_pair_cmp(
         .then(left.path.cmp(&right.path))
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_parse_bytes(data: &[u8]) {
+    let _ = read_pack_object_from_bytes(data, 0);
+    if !data.is_empty() {
+        let offset = usize::from(data[0]) % data.len();
+        let _ = read_pack_object_from_bytes(data, offset as u64);
+    }
+    let split = data
+        .first()
+        .map_or(0, |byte| usize::from(*byte) % data.len().saturating_add(1));
+    let _ = apply_pack_delta(&data[..split], &data[split..]);
+    let _ = parse_raw_commit(data);
+    let _ = parse_tree_entries(data);
+    let _ = PackIndex::from_data(PathBuf::from("fuzz.idx"), data.to_vec());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn git_tree_name_comparator_matches_directory_sort_rule() {
@@ -1978,5 +2208,55 @@ mod tests {
 
         let mut pos = 0;
         assert!(read_delta_varint(&oversized, &mut pos).is_err());
+    }
+
+    #[test]
+    fn pack_object_reader_rejects_declared_size_mismatches_and_large_objects() {
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), Default::default());
+        encoder.write_all(b"four").unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut pack = vec![(3 << 4) | 3];
+        pack.extend(compressed);
+
+        let error = read_pack_object_from_bytes(&pack, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pack object size mismatch"));
+        assert!(validate_git_object_size(MAX_GIT_OBJECT_BYTES + 1, "test object").is_err());
+
+        let oversized_delta_target = [0, 0x81, 0x80, 0x80, 0x80, 0x01];
+        assert!(apply_pack_delta(&[], &oversized_delta_target).is_err());
+    }
+
+    #[test]
+    fn cache_budgets_reset_at_entry_and_byte_limits() {
+        assert!(!cache_needs_reset(40, 60, 9, 10, 100));
+        assert!(cache_needs_reset(40, 61, 9, 10, 100));
+        assert!(cache_needs_reset(0, 1, 10, 10, 100));
+    }
+
+    #[test]
+    fn recursive_pack_operations_enforce_depth_limits() {
+        let mut depth = 0;
+        for _ in 0..MAX_PACK_DELTA_DEPTH {
+            depth = next_pack_delta_depth(depth).unwrap();
+        }
+        assert!(next_pack_delta_depth(depth).is_err());
+        assert!(validate_tree_diff_depth(MAX_TREE_DIFF_DEPTH).is_ok());
+        assert!(validate_tree_diff_depth(MAX_TREE_DIFF_DEPTH + 1).is_err());
+    }
+
+    #[test]
+    fn pack_index_rejects_non_monotonic_fanout() {
+        let mut data = vec![0; 8 + 256 * 4 + 40];
+        data[..4].copy_from_slice(&[0xff, b't', b'O', b'c']);
+        data[4..8].copy_from_slice(&2u32.to_be_bytes());
+        data[8..12].copy_from_slice(&2u32.to_be_bytes());
+        data[12..16].copy_from_slice(&1u32.to_be_bytes());
+        let error = match PackIndex::from_data(PathBuf::from("test.idx"), data) {
+            Ok(_) => panic!("non-monotonic fanout should fail"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("non-monotonic idx fanout"));
     }
 }

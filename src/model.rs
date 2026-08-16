@@ -1,4 +1,5 @@
 use rustc_hash::FxHashMap as HashMap;
+use serde::Serialize;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Commit {
@@ -9,7 +10,7 @@ pub(crate) struct Commit {
     pub(crate) files: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct Evidence {
     pub(crate) hash: String,
     pub(crate) date: String,
@@ -93,7 +94,7 @@ pub(crate) struct GraphBuildConfig {
     pub(crate) evidence_limit: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct ResultItem {
     pub(crate) path: String,
     pub(crate) score: f64,
@@ -104,16 +105,18 @@ pub(crate) struct ResultItem {
     pub(crate) evidence: Vec<Evidence>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct QueryOutput {
+    pub(crate) schema_version: u32,
     pub(crate) target: String,
     pub(crate) mode: String,
     pub(crate) related: Vec<ResultItem>,
     pub(crate) hints: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct ExplainOutput {
+    pub(crate) schema_version: u32,
     pub(crate) a: String,
     pub(crate) b: String,
     pub(crate) related: bool,
@@ -121,10 +124,12 @@ pub(crate) struct ExplainOutput {
     pub(crate) weight: f64,
     pub(crate) last_seen: String,
     pub(crate) evidence: Vec<Evidence>,
+    pub(crate) hints: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct EvalReport {
+    pub(crate) schema_version: u32,
     pub(crate) repo_root: String,
     pub(crate) query_shape: String,
     pub(crate) train_commits: usize,
@@ -138,7 +143,7 @@ pub(crate) struct EvalReport {
     pub(crate) metrics: Vec<EvalMetrics>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct EvalMetrics {
     pub(crate) mode: String,
     pub(crate) tasks: usize,

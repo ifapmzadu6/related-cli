@@ -1,30 +1,20 @@
 use crate::AnyResult;
 use crate::path_utils::{decode_git_path, literal_pathspec};
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+
+const MAX_GIT_STDOUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES: usize = 1024 * 1024;
+
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
 
 pub(crate) fn run_git(repo: impl AsRef<Path>, args: &[&str]) -> AnyResult<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo.as_ref())
-        .args(args)
-        .output()?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Err(format!(
-            "git -C {} {} failed: {}\n{}{}",
-            repo.as_ref().display(),
-            args.join(" "),
-            output.status,
-            stdout.trim(),
-            stderr.trim()
-        )
-        .into())
-    }
+    run_git_bounded(repo.as_ref(), args, None)
 }
 
 pub(crate) fn run_git_with_stdin(
@@ -32,35 +22,89 @@ pub(crate) fn run_git_with_stdin(
     args: &[&str],
     input: &[u8],
 ) -> AnyResult<Vec<u8>> {
+    run_git_bounded(repo.as_ref(), args, Some(input))
+}
+
+fn run_git_bounded(repo: &Path, args: &[&str], input: Option<&[u8]>) -> AnyResult<Vec<u8>> {
     let mut child = Command::new("git")
         .arg("-C")
-        .arg(repo.as_ref())
+        .arg(repo)
         .args(args)
-        .stdin(Stdio::piped())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or("failed to open git stdin")?
-        .write_all(input)?;
-    let output = child.wait_with_output()?;
-    if output.status.success() {
-        Ok(output.stdout)
+
+    let stdout = child.stdout.take().ok_or("failed to open git stdout")?;
+    let stderr = child.stderr.take().ok_or("failed to open git stderr")?;
+    let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_GIT_STDOUT_BYTES));
+    let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_GIT_STDERR_BYTES));
+
+    let input_result = if let Some(input) = input {
+        let mut stdin = child.stdin.take().ok_or("failed to open git stdin")?;
+        stdin.write_all(input)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(())
+    };
+    let status = child.wait();
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "git stdout reader panicked")??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "git stderr reader panicked")??;
+    input_result?;
+    let status = status?;
+
+    if stdout.exceeded {
+        return Err(format!(
+            "git -C {} {} produced more than {} MiB of output; narrow the history request",
+            repo.display(),
+            args.join(" "),
+            MAX_GIT_STDOUT_BYTES / (1024 * 1024)
+        )
+        .into());
+    }
+    if status.success() {
+        Ok(stdout.bytes)
+    } else {
+        let stderr_text = String::from_utf8_lossy(&stderr.bytes);
+        let stdout_text = String::from_utf8_lossy(&stdout.bytes);
+        let stderr_suffix = if stderr.exceeded {
+            "\n[git stderr truncated]"
+        } else {
+            ""
+        };
         Err(format!(
             "git -C {} {} failed: {}\n{}{}",
-            repo.as_ref().display(),
+            repo.display(),
             args.join(" "),
-            output.status,
-            stdout.trim(),
-            stderr.trim()
+            status,
+            stdout_text.trim(),
+            format_args!("{}{stderr_suffix}", stderr_text.trim())
         )
         .into())
     }
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedOutput> {
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 16 * 1024];
+    let mut exceeded = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let keep = read.min(limit.saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&buffer[..keep]);
+        exceeded |= keep < read;
+    }
+    Ok(BoundedOutput { bytes, exceeded })
 }
 
 pub(crate) fn git_path_is_tracked(repo: &str, path: &str) -> AnyResult<bool> {
@@ -93,4 +137,21 @@ pub(crate) fn git_diff_names(repo: &str, staged: bool) -> AnyResult<Vec<String>>
         }
     }
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn bounded_reader_keeps_the_prefix_and_drains_the_rest() {
+        let exact = read_bounded(Cursor::new(b"abcd"), 4).unwrap();
+        assert_eq!(exact.bytes, b"abcd");
+        assert!(!exact.exceeded);
+
+        let truncated = read_bounded(Cursor::new(b"abcdef"), 4).unwrap();
+        assert_eq!(truncated.bytes, b"abcd");
+        assert!(truncated.exceeded);
+    }
 }

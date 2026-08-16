@@ -40,6 +40,8 @@ jobs:
         run: cargo clippy --locked -- -D warnings
       - name: Test
         run: cargo test --locked --quiet
+      - name: Check parser fuzz target
+        run: CARGO_TARGET_DIR=target cargo check --manifest-path fuzz/Cargo.toml --locked
       - name: Check skill installer
         run: scripts/check_install_skill.sh
       - name: Check npm package shape
@@ -68,3 +70,17 @@ jobs:
           rustup toolchain install --profile minimal
       - name: Test
         run: cargo test --locked --quiet
+      - name: Smoke test npm runtime wrapper
+        shell: bash
+        run: |
+          cargo build --locked
+          HOST="$(rustc -vV | sed -n 's/^host: //p')"
+          case "$HOST" in
+            *-windows-*) BINARY="related.exe" ;;
+            *) BINARY="related" ;;
+          esac
+          mkdir -p "npm/prebuilt/$HOST"
+          cp "target/debug/$BINARY" "npm/prebuilt/$HOST/$BINARY"
+          ACTUAL_VERSION="$(node npm/bin/related.js --version | tr -d '\r')"
+          EXPECTED_VERSION="related $(node -p "require('./package.json').version")"
+          test "$ACTUAL_VERSION" = "$EXPECTED_VERSION"

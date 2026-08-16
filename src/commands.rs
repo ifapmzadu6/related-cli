@@ -16,7 +16,9 @@ use crate::history::{
     git_log_for_target_rev_list, gix_log_for_git_selected_target, gix_log_for_target,
 };
 use crate::model::*;
-use crate::output::{escape_text, print_eval, print_query, short_hash};
+use crate::output::{
+    OutputFormat, escape_text, parse_output_format, print_eval, print_json, print_query, short_hash,
+};
 use crate::pack::{
     git_log_for_target_pack_fast, git_log_for_target_pack_scan, git_pack_fast_direct_for_target,
     git_pack_scan_direct_for_target,
@@ -25,7 +27,7 @@ use crate::path_utils::{normalize_input_path, pair_key};
 use crate::repo::RepoContext;
 use crate::{
     AnyResult, DEFAULT_EVIDENCE, DEFAULT_HALF_LIFE_DAYS, DEFAULT_MAX_COMMITS, DEFAULT_MAX_FILES,
-    DEFAULT_ON_DEMAND_BACKEND, DEFAULT_TOP,
+    DEFAULT_ON_DEMAND_BACKEND, DEFAULT_TOP, JSON_SCHEMA_VERSION,
 };
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::io::{self, Write};
@@ -102,6 +104,7 @@ Options:
   --repo PATH                 Repository or subdirectory (default: .)
   --mode MODE                 direct, pagerank, path, or hot (default: direct)
   --top N                     Maximum results (default: {DEFAULT_TOP})
+  --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits per result (default: 0)
   --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
   --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
@@ -123,6 +126,7 @@ fn print_explain_usage<W: Write>(out: &mut W) -> AnyResult<()> {
 
 Options:
   --repo PATH                 Repository or subdirectory (default: .)
+  --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits to show (default: {DEFAULT_EVIDENCE})
   --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
   --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
@@ -146,6 +150,7 @@ Options:
   --repo PATH                 Repository or subdirectory (default: .)
   --mode MODE                 direct, pagerank, path, or hot (default: direct)
   --top N                     Maximum results (default: {DEFAULT_TOP})
+  --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits per result (default: 0)
   --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
   --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
@@ -171,6 +176,7 @@ Options:
   --test-commits N            Holdout commits (default: 200)
   --train-commits N           Training commits (default: 1000)
   --top N                     Evaluation cutoff (default: 10)
+  --format FORMAT             text or json (default: text)
   --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
   --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
   --modes MODES               Comma-separated ranking modes
@@ -186,6 +192,7 @@ fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "repo",
             "mode",
             "top",
+            "format",
             "evidence",
             "history-backend",
             "max-commits",
@@ -212,6 +219,7 @@ fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<
     let mode = flag_string(parsed, "mode", "direct");
     validate_query_mode(&mode)?;
     let top = flag_positive_usize(parsed, "top", DEFAULT_TOP)?;
+    let output_format = parse_output_format(&flag_string(parsed, "format", "text"))?;
     let exclude_patterns = parse_exclude_patterns(parsed);
     let mut config = parse_on_demand_config(parsed, 0)?;
 
@@ -245,12 +253,16 @@ fn cmd_query_on_demand<W: Write>(parsed: &ParsedArgs, out: &mut W) -> AnyResult<
         hints.insert(0, hint);
     }
     let output = QueryOutput {
+        schema_version: JSON_SCHEMA_VERSION,
         target,
         mode: format!("{mode}:on-demand:{:?}", config.backend),
         related,
         hints,
     };
-    print_query(out, &output)?;
+    match output_format {
+        OutputFormat::Text => print_query(out, &output)?,
+        OutputFormat::Json => print_json(out, &output)?,
+    }
     Ok(())
 }
 
@@ -427,6 +439,7 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         args,
         &[
             "repo",
+            "format",
             "evidence",
             "history-backend",
             "max-commits",
@@ -446,11 +459,12 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     }
 
     let repo = flag_string(&parsed, "repo", ".");
+    let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
     let mut config = parse_on_demand_config(&parsed, DEFAULT_EVIDENCE)?;
     let repo = RepoContext::discover(&repo)?;
     let root = repo.root_str()?;
     let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
-    let (output, runtime_backend_hint) = with_default_pack_fallback(&mut config, |config| {
+    let (mut output, runtime_backend_hint) = with_default_pack_fallback(&mut config, |config| {
         explain_relationship(
             root,
             &repo.input_base,
@@ -460,6 +474,16 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         )
     })?;
 
+    if let Some(hint) = backend_hint {
+        output.hints.push(hint);
+    }
+    if let Some(hint) = runtime_backend_hint {
+        output.hints.push(hint);
+    }
+    if output_format == OutputFormat::Json {
+        return print_json(out, &output);
+    }
+
     if !output.related {
         writeln!(
             out,
@@ -467,10 +491,7 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             escape_text(&output.a),
             escape_text(&output.b)
         )?;
-        if let Some(hint) = backend_hint {
-            writeln!(out, "hint: {hint}")?;
-        }
-        if let Some(hint) = runtime_backend_hint {
+        for hint in &output.hints {
             writeln!(out, "hint: {hint}")?;
         }
         return Ok(());
@@ -498,10 +519,7 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             escape_text(&ev.subject)
         )?;
     }
-    if let Some(hint) = backend_hint {
-        writeln!(out, "hint: {hint}")?;
-    }
-    if let Some(hint) = runtime_backend_hint {
+    for hint in &output.hints {
         writeln!(out, "hint: {hint}")?;
     }
     Ok(())
@@ -522,6 +540,7 @@ pub(crate) fn explain_relationship(
     let key = pair_key(&a, &b);
     let Some(pair) = graph.pairs.get(&key) else {
         return Ok(ExplainOutput {
+            schema_version: JSON_SCHEMA_VERSION,
             a,
             b,
             related: false,
@@ -529,10 +548,12 @@ pub(crate) fn explain_relationship(
             weight: 0.0,
             last_seen: String::new(),
             evidence: Vec::new(),
+            hints: Vec::new(),
         });
     };
 
     Ok(ExplainOutput {
+        schema_version: JSON_SCHEMA_VERSION,
         a,
         b,
         related: true,
@@ -540,6 +561,7 @@ pub(crate) fn explain_relationship(
         weight: pair.weight,
         last_seen: pair.last_seen.clone(),
         evidence: pair.evidence.clone(),
+        hints: Vec::new(),
     })
 }
 
@@ -550,6 +572,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "repo",
             "mode",
             "top",
+            "format",
             "evidence",
             "history-backend",
             "max-commits",
@@ -573,6 +596,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let mode = flag_string(&parsed, "mode", "direct");
     validate_query_mode(&mode)?;
     let top = flag_positive_usize(&parsed, "top", DEFAULT_TOP)?;
+    let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
     let staged = flag_bool(&parsed, "staged");
     let exclude_patterns = parse_exclude_patterns(&parsed);
     let mut config = parse_on_demand_config(&parsed, 0)?;
@@ -617,12 +641,16 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         hints.insert(0, hint);
     }
     let output = QueryOutput {
+        schema_version: JSON_SCHEMA_VERSION,
         target: changed.join(","),
         mode,
         related,
         hints,
     };
-    print_query(out, &output)?;
+    match output_format {
+        OutputFormat::Text => print_query(out, &output)?,
+        OutputFormat::Json => print_json(out, &output)?,
+    }
     Ok(())
 }
 
@@ -661,6 +689,7 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "test-commits",
             "train-commits",
             "top",
+            "format",
             "max-files-per-commit",
             "half-life-days",
             "modes",
@@ -679,6 +708,7 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let test_commits = flag_positive_usize(&parsed, "test-commits", 200)?;
     let train_commits = flag_positive_usize(&parsed, "train-commits", 1000)?;
     let top = flag_positive_usize(&parsed, "top", 10)?;
+    let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
     let max_files = flag_positive_usize(&parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?;
     let half_life = flag_positive_f64(&parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?;
     let modes = parse_modes(&flag_string(&parsed, "modes", "direct,pagerank,path,hot"));
@@ -721,7 +751,10 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     report.top_k = top;
     report.max_files_per_commit = max_files;
 
-    print_eval(out, &report)?;
+    match output_format {
+        OutputFormat::Text => print_eval(out, &report)?,
+        OutputFormat::Json => print_json(out, &report)?,
+    }
     Ok(())
 }
 

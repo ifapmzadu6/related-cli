@@ -54,6 +54,19 @@ function copyDir(source, dest) {
   }
 }
 
+function pinRuntimeVersion(skillDir, packageVersion) {
+  const skillPath = path.join(skillDir, "SKILL.md");
+  const source = fs.readFileSync(skillPath, "utf8");
+  const pinned = source.replace(
+    /related-cli@latest(?= related (?:query|diff)\b)/g,
+    `related-cli@${packageVersion}`,
+  );
+  if (pinned === source) {
+    throw new Error(`missing runtime package reference in ${skillPath}`);
+  }
+  fs.writeFileSync(skillPath, pinned);
+}
+
 function parseArgs(argv) {
   let agent = "codex";
   let scope = "project";
@@ -93,7 +106,7 @@ function destination({ agent, scope }) {
   return path.join(os.homedir(), ".claude", "skills", "find-related-files");
 }
 
-function installSkill(skillSource, dest) {
+function installSkill(skillSource, dest, packageVersion) {
   if (!fs.existsSync(path.join(skillSource, "SKILL.md"))) {
     throw new Error(`missing skill source: ${skillSource}`);
   }
@@ -107,6 +120,7 @@ function installSkill(skillSource, dest) {
   let installed = false;
   try {
     copyDir(skillSource, tmp);
+    pinRuntimeVersion(tmp, packageVersion);
     if (fs.existsSync(dest)) {
       backup = fs.mkdtempSync(path.join(destParent, `.${destName}.backup.`));
       fs.rmdirSync(backup);
@@ -136,9 +150,10 @@ function installSkill(skillSource, dest) {
 
 function main() {
   const packageRoot = path.resolve(__dirname, "..", "..");
+  const packageVersion = require(path.join(packageRoot, "package.json")).version;
   const skillSource = path.join(packageRoot, "skills", "find-related-files");
   const dest = destination(parseArgs(process.argv.slice(2)));
-  installSkill(skillSource, dest);
+  installSkill(skillSource, dest, packageVersion);
   console.log(`installed find-related-files skill to ${dest}`);
 }
 

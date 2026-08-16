@@ -1,6 +1,28 @@
+use crate::AnyResult;
 use crate::model::{EvalReport, QueryOutput};
+use serde::Serialize;
 use std::borrow::Cow;
 use std::io::{self, Write};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutputFormat {
+    Text,
+    Json,
+}
+
+pub(crate) fn parse_output_format(value: &str) -> AnyResult<OutputFormat> {
+    match value {
+        "text" => Ok(OutputFormat::Text),
+        "json" => Ok(OutputFormat::Json),
+        other => Err(format!("unknown output format {other:?}; use text or json").into()),
+    }
+}
+
+pub(crate) fn print_json<W: Write, T: Serialize>(out: &mut W, value: &T) -> AnyResult<()> {
+    serde_json::to_writer(&mut *out, value)?;
+    writeln!(out)?;
+    Ok(())
+}
 
 pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Result<()> {
     writeln!(
@@ -139,6 +161,7 @@ mod tests {
     #[test]
     fn empty_query_output_keeps_hints() {
         let output = QueryOutput {
+            schema_version: crate::JSON_SCHEMA_VERSION,
             target: "a.md".to_string(),
             mode: "direct".to_string(),
             related: Vec::new(),

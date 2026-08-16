@@ -31,6 +31,7 @@ cargo check --locked
 cargo fmt --check
 cargo clippy --locked -- -D warnings
 cargo test --locked --quiet
+CARGO_TARGET_DIR=target cargo check --manifest-path fuzz/Cargo.toml --locked
 scripts/check_install_skill.sh
 RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --dry-run
 scripts/check_npm_package.sh
@@ -43,6 +44,13 @@ If a Codex skill validator is available, also validate:
 
 ```sh
 python3 path/to/quick_validate.py skills/find-related-files
+```
+
+For parser changes, also run a bounded fuzz smoke test when `cargo-fuzz` and a
+nightly toolchain are available:
+
+```sh
+cargo +nightly fuzz run repository_parsers -- -max_total_time=60
 ```
 
 ### Commit and tag

@@ -1,9 +1,9 @@
-use crate::AnyResult;
 use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::model::{
     Commit, EvalAccumulator, EvalMetrics, EvalReport, GraphBuildConfig, OnDemandBackend,
     OnDemandConfig, RelatedGraph, ResultItem,
 };
+use crate::{AnyResult, JSON_SCHEMA_VERSION};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 pub(crate) fn evaluate_global(
@@ -125,6 +125,7 @@ fn evaluate_with_query(
         })
         .collect();
     let mut report = EvalReport {
+        schema_version: JSON_SCHEMA_VERSION,
         repo_root: String::new(),
         query_shape: query_shape.to_string(),
         train_commits: 0,

@@ -52,6 +52,8 @@ env npm_config_loglevel=error npx -y --package related-cli@latest related query 
 - Add `--evidence N` when examples of shared commits would help.
 - Add `--exclude PATTERNS` to hide comma-separated path patterns such as
   `*.lock,*-lock.*,*lockb,.github/workflows/*` from results.
+- Add `--format json` only when another tool needs structured output; compact
+  text is smaller for ordinary agent context.
 - Use `explain file-a file-b` to inspect one relationship.
 - Use `--history-backend git` when exact Git history is more important than
   low latency.
@@ -61,10 +63,11 @@ env npm_config_loglevel=error npx -y --package related-cli@latest related query 
 
 ## Distribution Notes
 
-Do not require global installation. Use `related-cli@latest` so the skill picks
-up CLI fixes and performance improvements automatically. The skill instructions
-themselves are copied into the agent, so update them by pulling this repository
-or by rerunning `npx -y --package related-cli@latest related-install-skill` for
-a Codex project install from the target project root. Use
+Do not require global installation. The installer pins runtime query commands in
+the copied skill to the package version that supplied it, making ordinary skill
+runs reproducible. Pick up CLI fixes and performance improvements by pulling
+this repository or by rerunning
+`npx -y --package related-cli@latest related-install-skill` for a Codex project
+install from the target project root. Use
 `related-install-skill claude` for a Claude Code project install, and use
 `--user` only when a user-level install is intentional.

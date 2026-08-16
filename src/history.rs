@@ -905,6 +905,12 @@ fn parse_git_log_direct(
         .collect())
 }
 
+#[cfg(feature = "fuzzing")]
+pub(crate) fn fuzz_parse_bytes(data: &[u8]) {
+    let _ = parse_git_log(data);
+    let _ = parse_git_log_record(data);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

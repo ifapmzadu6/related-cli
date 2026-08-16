@@ -1,9 +1,12 @@
 [package]
 name = "related"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/ifapmzadu6/related-cli"
+
+[features]
+fuzzing = []
 
 [dependencies]
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
@@ -11,6 +14,8 @@ gix = { version = "0.86", default-features = false, features = ["blob-diff", "ma
 memmap2 = "0.9"
 rayon = "1"
 rustc-hash = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 lto = "thin"
