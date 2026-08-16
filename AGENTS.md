@@ -11,6 +11,7 @@ focused on user-facing CLI and skill installation docs.
    - `Cargo.toml`
    - `package.json`
    - `Cargo.lock` after Cargo refreshes it
+   - `fuzz/Cargo.lock` after Cargo refreshes it
    - the `workflow_dispatch` tag example in `.github/workflows/release.yml`
 2. Use a `vX.Y.Z` tag name. The package version is `X.Y.Z`.
 3. Verify the version/tag match before tagging:
@@ -19,8 +20,8 @@ focused on user-facing CLI and skill installation docs.
 scripts/verify_release_version.sh vX.Y.Z
 ```
 
-If `Cargo.lock` still contains the old package version, run `cargo check` once
-without `--locked`, then rerun the locked checks below.
+If either lockfile still contains the old package version, run its `cargo check`
+once without `--locked`, then rerun the locked checks below.
 
 ### Local checks
 

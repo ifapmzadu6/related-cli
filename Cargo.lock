@@ -1349,7 +1349,7 @@ checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 
 [[package]]
 name = "related"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "flate2",
  "gix",

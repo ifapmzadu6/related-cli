@@ -25,6 +25,16 @@ LOCK_VERSION="$(awk '
     exit
   }
 ' Cargo.lock)"
+FUZZ_LOCK_VERSION="$(awk '
+  $0 == "name = \"related\"" { found = 1; next }
+  found && /^version = "/ {
+    value = $0
+    sub(/^version = "/, "", value)
+    sub(/"$/, "", value)
+    print value
+    exit
+  }
+' fuzz/Cargo.lock)"
 WORKFLOW_TAG_EXAMPLE="$(
   sed -n 's/.*for example \(v[0-9][0-9.]*\)".*/\1/p' .github/workflows/release.yml | head -1
 )"
@@ -41,6 +51,11 @@ fi
 
 if [[ "$LOCK_VERSION" != "$VERSION" ]]; then
   echo "Cargo.lock version $LOCK_VERSION does not match tag $TAG" >&2
+  exit 1
+fi
+
+if [[ "$FUZZ_LOCK_VERSION" != "$VERSION" ]]; then
+  echo "fuzz/Cargo.lock version $FUZZ_LOCK_VERSION does not match tag $TAG" >&2
   exit 1
 fi
 
