@@ -734,6 +734,11 @@ pub(crate) fn format_gix_time(time: gix::date::Time) -> String {
     time.format_or_unix(gix::date::time::format::ISO8601_STRICT)
 }
 
+fn normalize_git_iso8601_date(date: &str) -> String {
+    date.strip_suffix('Z')
+        .map_or_else(|| date.to_string(), |prefix| format!("{prefix}+00:00"))
+}
+
 struct GitLogRecord<'a> {
     header: &'a str,
     files: Vec<String>,
@@ -793,7 +798,7 @@ fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
             .ok_or("missing commit unix time")?
             .parse()
             .map_err(|err| format!("invalid commit unix time: {err}"))?;
-        let date = fields.next().ok_or("missing commit date")?.to_string();
+        let date = normalize_git_iso8601_date(fields.next().ok_or("missing commit date")?);
         let subject = fields.next().unwrap_or_default().to_string();
         let mut seen = HashSet::default();
         let mut files = Vec::new();
@@ -848,6 +853,7 @@ fn parse_git_log_direct(
         let unix_time: i64 = unix_time_raw
             .parse()
             .map_err(|err| format!("invalid commit unix time: {err}"))?;
+        let date = normalize_git_iso8601_date(date);
         let file_count = record.files.len();
         let has_target = record.files.iter().any(|file| file == target);
         if file_count == 0 || file_count > max_files || !has_target {
@@ -865,13 +871,13 @@ fn parse_git_log_direct(
             pair.cochanges += 1;
             pair.weight += pair_weight;
             pair.other_weight += decay;
-            if pair.last_seen.is_empty() || date > pair.last_seen.as_str() {
-                pair.last_seen = date.to_string();
+            if pair.last_seen.is_empty() || date.as_str() > pair.last_seen.as_str() {
+                pair.last_seen = date.clone();
             }
             if pair.evidence.len() < config.evidence_limit {
                 let evidence = evidence.get_or_insert_with(|| Evidence {
                     hash: hash.to_string(),
-                    date: date.to_string(),
+                    date: date.clone(),
                     subject: subject.to_string(),
                     file_count,
                     weight: pair_weight,
@@ -920,5 +926,17 @@ mod tests {
         let raw = b"hash\x1f1\x1f2026-01-01T00:00:00Z\x1fsubject\n\0line\nbreak.md\0other.md\0";
         let record = parse_git_log_record(raw).unwrap().unwrap();
         assert_eq!(record.files, vec!["line\nbreak.md", "other.md"]);
+    }
+
+    #[test]
+    fn git_utc_dates_use_the_pack_backend_offset_format() {
+        assert_eq!(
+            normalize_git_iso8601_date("2026-01-01T00:00:00Z"),
+            "2026-01-01T00:00:00+00:00"
+        );
+        assert_eq!(
+            normalize_git_iso8601_date("2026-01-01T09:00:00+09:00"),
+            "2026-01-01T09:00:00+09:00"
+        );
     }
 }
