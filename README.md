@@ -13,8 +13,8 @@
 </div>
 
 `related` ranks files related to a target file using only Git co-change
-history. It is intended as a small context-expansion step before an agent or
-developer edits, reviews, or explains a tracked file.
+history. It is intended as a small, supplementary context-expansion step before
+an agent or developer edits, reviews, or explains a tracked file.
 
 It does not parse source code, imports, symbols, embeddings, or file contents.
 The same signal therefore works for code, tests, docs, configs, migrations,
@@ -41,6 +41,10 @@ The npm package ships a portable `find-related-files` skill for Codex and
 Claude Code. The skill does not vendor the binary or require a global install.
 Its installer pins normal query commands to the installed package version; run
 the installer again when you want to update it.
+
+The installed workflow keeps explicit task requirements, direct source search,
+and tests authoritative. Co-change rankings add candidates; they do not define
+the edit plan.
 
 ### Codex
 
@@ -204,6 +208,10 @@ presented as production-query accuracy.
 - File renames are not followed by the exact Git backend.
 - Deleted paths are not returned as related-file candidates.
 - Co-change is correlation, not a requirement to edit every returned file.
+- End-to-end agent accuracy improvement is not yet established; the initial
+  three-task paired pilot found one efficiency win, one regression, and one
+  neutral functional result. One guarded rerun corrected the known regression,
+  but that is not enough to establish a general effect.
 - The default `pack-fast` backend favors latency over an exact complete walk.
 
 ## Measurements and comparisons
@@ -216,6 +224,10 @@ The detailed research material is kept separate from the user guide:
   token, and backend experiments.
 - [COMPARISON.md](COMPARISON.md) compares the project with nearby tools and
   documents the scope of those comparisons.
+- [The Codex editing pilot](experiments/agent-ab/results/2026-08-16-pilot.md)
+  compares three tasks with and without the lookup; its
+  [guardrail follow-up](experiments/agent-ab/results/2026-08-16-guardrail-follow-up.md)
+  checks the known failure once more.
 
 Reproduction helpers are available in `scripts/compare.sh`,
 `scripts/speed_compare.py`, and `scripts/external_tool_compare.sh`.

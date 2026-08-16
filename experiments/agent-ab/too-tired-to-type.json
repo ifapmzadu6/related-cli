@@ -1,0 +1,54 @@
+{
+  "repository": "ifapmzadu6/too_tired_to_type",
+  "cases": [
+    {
+      "id": "history-calendar-padding",
+      "target_commit": "9168815734e9726184210ee01fb2b2a314ea068c",
+      "seed_file": "ios/TooTiredToType/ui/history/HistoryView.swift",
+      "task": "履歴画面のカレンダーカード内に左右16の余白を追加し、既存の上下16の余白と揃えてください。iOS・Android・Webで見た目を統一し、カードの最大幅336は維持してください。",
+      "validation_commands": []
+    },
+    {
+      "id": "native-header-icon-size",
+      "target_commit": "a23507af9fc6688f5899b6fef7162a78184d12f7",
+      "seed_file": "ios/TooTiredToType/ui/settings/SettingsView.swift",
+      "task": "設定画面と通知履歴画面のナビゲーション中央アイコンを28から24へ縮小してください。iOSとAndroidの両方で同じサイズにし、それ以外のレイアウトは変更しないでください。",
+      "validation_commands": []
+    },
+    {
+      "id": "topics-cost-protection",
+      "target_commit": "caab5aa7f8733f630d959d4188610ba938482a89",
+      "seed_file": "api/src/topics.ts",
+      "task": "通知topicsエンドポイントをコスト増幅攻撃から保護してください。JSON解析前に宣言済みまたはストリーミングされた8 KiB超のbodyを413にします。Workers Rate LimitingでSHA-256化したFCM tokenごとに5回/分、その後IPごとに200回/分を適用し、token側で拒否した場合はIP枠を消費しないでください。確定的な制限は429、limiter障害時はfail closedで503にします。Analytics Engineにはtoken hashやIPを保存せず理由だけを記録し、設定・型・ドキュメントも更新してください。",
+      "expected_files": [
+        "api/README.md",
+        "api/src/push.ts",
+        "api/src/topics-rate-limit.ts",
+        "api/src/topics.ts",
+        "api/test/topics.test.ts",
+        "api/wrangler.jsonc"
+      ],
+      "shared_paths": ["api/node_modules"],
+      "fixture_files": [
+        {
+          "source": "fixtures/topics-cost-protection.test.ts",
+          "destination": "api/test/topics.agent-ab.test.ts"
+        },
+        {
+          "source": "fixtures/vitest-unit.config.ts",
+          "destination": "api/vitest.agent-ab.config.ts"
+        }
+      ],
+      "validation_commands": [
+        [
+          "api/node_modules/.bin/vitest",
+          "run",
+          "--root",
+          "api",
+          "--config",
+          "vitest.agent-ab.config.ts"
+        ]
+      ]
+    }
+  ]
+}
