@@ -1,4 +1,4 @@
 interface:
   display_name: "Find Related Files"
   short_description: "Find Git co-change companion files."
-  default_prompt: "Find historically related files, then reconcile them with the explicit task scope and direct search."
+  default_prompt: "When the edit scope is uncertain, find historical companion files once, then reconcile them with the explicit task scope and direct search."

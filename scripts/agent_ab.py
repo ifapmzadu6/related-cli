@@ -14,10 +14,13 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
 import shlex
+import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -174,15 +177,17 @@ Task:
 """
     if arm == "with-related":
         treatment = f"""
-Before reading or searching other source files, your first repository-inspection command must be:
+Use the installed find-related-files skill. Before reading or searching other source files, run
+this initial repository-inspection command exactly once:
 
 env npm_config_loglevel=error npx -y --package {shlex.quote(package)} related query {shlex.quote(case.seed_file)} --top 10
 
-Use its results only as context hints, then inspect the relevant files and implement the task.
-Before choosing edit targets, verify every explicitly named component, screen, platform, layer,
-and test with direct path or source-text search. Query another representative anchor for each
-independent surface when possible. The task text overrides the ranking: do not drop a named
-target, or substitute a similarly named result, because of the related-file output.
+Do not repeat an identical query. Use its results only as context hints, then inspect the relevant
+files and implement the task. Before choosing edit targets, verify every explicitly named
+component, screen, platform, layer, and test with direct path or source-text search. Default to
+the single seed query; run at most one additional related query only if a genuinely independent
+surface remains unresolved after direct search. The task text overrides the ranking: do not drop
+a named target, or substitute a similarly named result, because of the related-file output.
 """
     else:
         treatment = """
@@ -203,6 +208,54 @@ def create_worktree(repo: Path, path: Path, base: str, shared_paths: tuple[str, 
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.symlink_to(source, target_is_directory=source.is_dir())
+
+
+def install_benchmark_skill(
+    worktree: Path, skill: Path | None, package: str
+) -> Path | None:
+    if skill is None:
+        return None
+    if not (skill / "SKILL.md").is_file():
+        raise RuntimeError(f"benchmark skill is missing SKILL.md: {skill}")
+    destination = worktree / ".agents/skills/find-related-files"
+    backup = worktree.parent / f"{worktree.name}-original-find-related-files"
+    if backup.exists():
+        shutil.rmtree(backup)
+    if destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(destination), str(backup))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(skill, destination)
+    skill_file = destination / "SKILL.md"
+    content = skill_file.read_text(encoding="utf-8")
+    skill_file.write_text(
+        content.replace("related-cli@latest", package), encoding="utf-8"
+    )
+    return backup
+
+
+def skill_fingerprint(skill: Path | None) -> str | None:
+    if skill is None:
+        return None
+    skill_file = skill / "SKILL.md"
+    if not skill_file.is_file():
+        raise RuntimeError(f"benchmark skill is missing SKILL.md: {skill}")
+    digest = hashlib.sha256()
+    for path in sorted(item for item in skill.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(skill).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def restore_benchmark_skill(worktree: Path, backup: Path | None) -> None:
+    destination = worktree / ".agents/skills/find-related-files"
+    if destination.exists():
+        shutil.rmtree(destination)
+    if backup is not None and backup.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(backup), str(destination))
 
 
 def changed_files(worktree: Path, excluded_paths: tuple[str, ...]) -> list[str]:
@@ -281,6 +334,26 @@ def parse_codex_jsonl(stdout: str) -> tuple[dict[str, int], str]:
         if event.get("type") == "item.completed" and item.get("type") == "agent_message":
             final_message = item.get("text", "")
     return usage, final_message
+
+
+def related_query_metrics(stdout: str) -> dict[str, int]:
+    commands = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        item = event.get("item", {})
+        if (
+            event.get("type") == "item.started"
+            and item.get("type") == "command_execution"
+            and re.search(r"\brelated query\b", item.get("command", ""))
+        ):
+            commands.append(item["command"])
+    return {
+        "related_query_commands": len(commands),
+        "duplicate_related_query_commands": len(commands) - len(set(commands)),
+    }
 
 
 def copy_hidden_files(
@@ -373,8 +446,10 @@ def trial(
     codex_timeout: int,
     validation_timeout: int,
     artifacts: Path,
+    treatment_skill: Path | None,
 ) -> dict[str, Any]:
     create_worktree(repo, worktree, base, case.shared_paths)
+    skill_backup = install_benchmark_skill(worktree, treatment_skill, package)
     prompt = prompt_for(case, arm, package)
     command = [
         "codex",
@@ -406,6 +481,7 @@ def trial(
     artifact_prefix.with_suffix(".jsonl").write_text(codex.stdout, encoding="utf-8")
     artifact_prefix.with_suffix(".stderr.log").write_text(codex.stderr, encoding="utf-8")
 
+    restore_benchmark_skill(worktree, skill_backup)
     candidate_files = changed_files(worktree, case.shared_paths)
     candidate_patch = diff_with_untracked(worktree, candidate_files)
     expected_patch = git(
@@ -432,6 +508,7 @@ def trial(
         "codex_exit_code": codex.returncode,
         "codex_timed_out": timed_out,
         "usage": usage,
+        **related_query_metrics(codex.stdout),
         "non_cached_input_tokens": max(
             0, usage["input_tokens"] - usage["cached_input_tokens"]
         ),
@@ -444,28 +521,110 @@ def trial(
         and all(check.get("exit_code") == 0 for check in checks),
         "final_message": final_message,
     }
+    result["target_file_success"] = (
+        result["all_checks_passed"]
+        and result["expected_files"] > 0
+        and result["matching_files"] == result["expected_files"]
+    )
+    result["exact_patch_success"] = (
+        result["target_file_success"]
+        and result["changed_line_precision"] == 1.0
+        and result["changed_line_recall"] == 1.0
+    )
     return result
+
+
+def aggregate_arm(results: list[dict[str, Any]], arm: str) -> dict[str, float | int]:
+    selected = [result for result in results if result["arm"] == arm]
+    if not selected:
+        return {
+            "trials": 0,
+            "target_file_successes": 0,
+            "exact_patch_successes": 0,
+            "mean_file_precision": 0.0,
+            "mean_file_recall": 0.0,
+            "mean_changed_line_precision": 0.0,
+            "mean_changed_line_recall": 0.0,
+            "non_cached_input_tokens": 0,
+            "output_tokens": 0,
+            "duration_seconds": 0.0,
+            "median_duration_seconds": 0.0,
+            "related_query_commands": 0,
+            "duplicate_related_query_commands": 0,
+        }
+    return {
+        "trials": len(selected),
+        "target_file_successes": sum(bool(item["target_file_success"]) for item in selected),
+        "exact_patch_successes": sum(bool(item["exact_patch_success"]) for item in selected),
+        "mean_file_precision": statistics.mean(item["file_precision"] for item in selected),
+        "mean_file_recall": statistics.mean(item["file_recall"] for item in selected),
+        "mean_changed_line_precision": statistics.mean(
+            item["changed_line_precision"] for item in selected
+        ),
+        "mean_changed_line_recall": statistics.mean(
+            item["changed_line_recall"] for item in selected
+        ),
+        "non_cached_input_tokens": sum(item["non_cached_input_tokens"] for item in selected),
+        "output_tokens": sum(item["usage"]["output_tokens"] for item in selected),
+        "duration_seconds": sum(item["duration_seconds"] for item in selected),
+        "median_duration_seconds": statistics.median(
+            item["duration_seconds"] for item in selected
+        ),
+        "related_query_commands": sum(
+            item.get("related_query_commands", 0) for item in selected
+        ),
+        "duplicate_related_query_commands": sum(
+            item.get("duplicate_related_query_commands", 0) for item in selected
+        ),
+    }
+
+
+def paired_outcomes(results: list[dict[str, Any]]) -> dict[str, int]:
+    by_case: dict[str, dict[str, dict[str, Any]]] = {}
+    for result in results:
+        by_case.setdefault(result["case"], {})[result["arm"]] = result
+    wins = losses = ties = incomplete = 0
+    for arms in by_case.values():
+        if any(arm not in arms for arm in ARMS):
+            incomplete += 1
+            continue
+        control = bool(arms["without-related"]["target_file_success"])
+        treatment = bool(arms["with-related"]["target_file_success"])
+        if treatment and not control:
+            wins += 1
+        elif control and not treatment:
+            losses += 1
+        else:
+            ties += 1
+    return {
+        "treatment_wins": wins,
+        "treatment_losses": losses,
+        "ties": ties,
+        "incomplete": incomplete,
+    }
 
 
 def markdown_report(metadata: dict[str, Any], results: list[dict[str, Any]]) -> str:
     lines = [
-        "# Agent A/B pilot",
+        "# Agent A/B evaluation",
         "",
         f"- Repository: `{metadata['repository']}`",
         f"- related package: `{metadata['related_package']}`",
         f"- Codex: `{metadata['codex_version']}`",
         f"- Generated: `{metadata['generated_at']}`",
         "",
-        "| Case | Arm | Files P/R | Changed lines P/R | Checks | Input tokens (non-cached) | Output tokens | Time |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Case | Arm | Target files | Exact patch | Files P/R | Changed lines P/R | Checks | Input tokens (non-cached) | Output tokens | Time |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for result in results:
         checks = "pass" if result["all_checks_passed"] else "fail"
         lines.append(
-            "| {case} | {arm} | {fp:.3f}/{fr:.3f} | {lp:.3f}/{lr:.3f} | {checks} | "
+            "| {case} | {arm} | {target} | {exact} | {fp:.3f}/{fr:.3f} | {lp:.3f}/{lr:.3f} | {checks} | "
             "{input_tokens} ({non_cached}) | {output_tokens} | {duration:.1f}s |".format(
                 case=result["case"],
                 arm=result["arm"],
+                target="pass" if result["target_file_success"] else "fail",
+                exact="pass" if result["exact_patch_success"] else "fail",
                 fp=result["file_precision"],
                 fr=result["file_recall"],
                 lp=result["changed_line_precision"],
@@ -477,6 +636,50 @@ def markdown_report(metadata: dict[str, Any], results: list[dict[str, Any]]) -> 
                 duration=result["duration_seconds"],
             )
         )
+    aggregates = {arm: aggregate_arm(results, arm) for arm in ARMS}
+    lines.extend(
+        [
+            "",
+            "## Aggregate",
+            "",
+            "| Arm | Target-file success | Exact patch | Mean files P/R | Mean changed lines P/R | Non-cached input | Output | Total time | Median time |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for arm in ARMS:
+        item = aggregates[arm]
+        lines.append(
+            "| {arm} | {target}/{trials} | {exact}/{trials} | {fp:.3f}/{fr:.3f} | "
+            "{lp:.3f}/{lr:.3f} | {input_tokens} | {output_tokens} | {duration:.1f}s | "
+            "{median:.1f}s |".format(
+                arm=arm,
+                target=item["target_file_successes"],
+                exact=item["exact_patch_successes"],
+                trials=item["trials"],
+                fp=item["mean_file_precision"],
+                fr=item["mean_file_recall"],
+                lp=item["mean_changed_line_precision"],
+                lr=item["mean_changed_line_recall"],
+                input_tokens=item["non_cached_input_tokens"],
+                output_tokens=item["output_tokens"],
+                duration=item["duration_seconds"],
+                median=item["median_duration_seconds"],
+            )
+        )
+    paired = paired_outcomes(results)
+    lines.extend(
+        [
+            "",
+            "Paired target-file outcomes for the treatment arm: "
+            f"{paired['treatment_wins']} wins, {paired['treatment_losses']} losses, "
+            f"{paired['ties']} ties, and {paired['incomplete']} incomplete cases.",
+            "",
+            "Related-query commands: "
+            f"{aggregates['with-related']['related_query_commands']} total, including "
+            f"{aggregates['with-related']['duplicate_related_query_commands']} exact duplicates.",
+            "",
+        ]
+    )
     lines.extend(
         [
             "",
@@ -495,7 +698,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repo", required=True, type=Path, help="local benchmark repository")
     parser.add_argument("--cases", required=True, type=Path, help="JSON case definition")
     parser.add_argument("--output", required=True, type=Path, help="artifact directory")
-    parser.add_argument("--related-package", default="related-cli@0.4.0")
+    parser.add_argument("--related-package", default="related-cli@0.4.1")
     parser.add_argument("--model", help="optional Codex model override")
     parser.add_argument("--max-cases", type=int, default=0, help="0 runs every case")
     parser.add_argument(
@@ -513,12 +716,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--codex-timeout", type=int, default=900)
     parser.add_argument("--validation-timeout", type=int, default=300)
+    parser.add_argument(
+        "--treatment-skill",
+        type=Path,
+        help="inject this skill into both arms while Codex runs, then restore the checkout",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse completed case/arm results already present in the output directory",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="validate and resolve selected cases without starting Codex",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     repo = args.repo.resolve()
+    treatment_skill = args.treatment_skill.resolve() if args.treatment_skill else None
+    treatment_skill_sha256 = skill_fingerprint(treatment_skill)
     ensure_repository(repo)
     repository_label, cases = load_cases(args.cases)
     if args.selected_cases:
@@ -533,17 +753,54 @@ def main() -> int:
     if not cases:
         raise RuntimeError("no benchmark cases selected")
 
+    if args.validate_only:
+        for case in cases:
+            base, target, expected_files = resolve_case(repo, case)
+            print(
+                f"{case.case_id}: base={base} target={target} "
+                f"expected_files={len(expected_files)}"
+            )
+        return 0
+
     args.output.mkdir(parents=True, exist_ok=True)
     codex_version = run(["codex", "--version"], cwd=repo).stdout.strip()
     metadata = {
         "repository": repository_label or str(repo),
         "repository_head": git_text(repo, "rev-parse", "HEAD"),
+        "cases_file_sha256": hashlib.sha256(args.cases.read_bytes()).hexdigest(),
+        "selected_cases": [case.case_id for case in cases],
+        "selected_arms": sorted(args.selected_arms or ARMS),
         "related_package": args.related_package,
+        "treatment_skill": str(treatment_skill) if treatment_skill else None,
+        "treatment_skill_sha256": treatment_skill_sha256,
         "codex_version": codex_version,
         "model_override": args.model,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     results: list[dict[str, Any]] = []
+    results_path = args.output / "results.json"
+    if args.resume and results_path.is_file():
+        prior = json.loads(results_path.read_text(encoding="utf-8"))
+        prior_metadata = prior.get("metadata", {})
+        for key in (
+            "repository",
+            "repository_head",
+            "cases_file_sha256",
+            "selected_cases",
+            "selected_arms",
+            "related_package",
+            "treatment_skill_sha256",
+            "codex_version",
+            "model_override",
+        ):
+            if prior_metadata.get(key) != metadata.get(key):
+                raise RuntimeError(
+                    f"cannot resume: metadata mismatch for {key}: "
+                    f"{prior_metadata.get(key)!r} != {metadata.get(key)!r}"
+                )
+        metadata = prior_metadata
+        results = list(prior.get("results", []))
+    completed = {(result["case"], result["arm"]) for result in results}
 
     with tempfile.TemporaryDirectory(prefix="related-agent-ab-") as temporary:
         root = Path(temporary)
@@ -556,6 +813,9 @@ def main() -> int:
                 selected_arms = set(args.selected_arms)
                 arms = [arm for arm in arms if arm in selected_arms]
             for arm in arms:
+                if (case.case_id, arm) in completed:
+                    print(f"skipping completed {case.case_id}/{arm}", flush=True)
+                    continue
                 worktree = root / f"{index:02d}-{case.case_id}-{arm}"
                 print(f"running {case.case_id}/{arm}", flush=True)
                 try:
@@ -572,9 +832,10 @@ def main() -> int:
                         codex_timeout=args.codex_timeout,
                         validation_timeout=args.validation_timeout,
                         artifacts=args.output,
+                        treatment_skill=treatment_skill,
                     )
                     results.append(result)
-                    (args.output / "results.json").write_text(
+                    results_path.write_text(
                         json.dumps({"metadata": metadata, "results": results}, indent=2) + "\n",
                         encoding="utf-8",
                     )
@@ -583,7 +844,7 @@ def main() -> int:
                         git(repo, "worktree", "remove", "--force", str(worktree), check=False)
 
     payload = {"metadata": metadata, "results": results}
-    (args.output / "results.json").write_text(
+    results_path.write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
     )
     (args.output / "summary.md").write_text(
