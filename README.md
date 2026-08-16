@@ -44,7 +44,9 @@ the installer again when you want to update it.
 
 The installed workflow keeps explicit task requirements, direct source search,
 and tests authoritative. Co-change rankings add candidates; they do not define
-the edit plan.
+the edit plan. It is especially useful as a pre-commit or pre-PR completeness
+audit: aggregate the changed set once, then check whether historically coupled
+docs, tests, configs, or companion implementations were unintentionally missed.
 
 ### Codex
 
@@ -92,6 +94,7 @@ directly through the npm package:
 
 ```sh
 npx -y --package related-cli@latest related query src/auth.ts --top 20
+npx -y --package related-cli@latest related diff --top 20
 npx -y --package related-cli@latest related diff --staged --top 20
 ```
 

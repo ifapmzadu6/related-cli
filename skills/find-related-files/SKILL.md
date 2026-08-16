@@ -1,45 +1,65 @@
 ---
 name: find-related-files
-description: Find historically related files before editing or reviewing a Git-tracked file by running related-cli against Git co-change history. Use when Codex should discover likely companion files in a repository without parsing source code, grep, embeddings, or persistent indexes.
+description: Find likely companion files from Git co-change history when an editing or review task starts from one or a few files and the full file scope is uncertain. Use to discover non-obvious tests, configs, docs, migrations, or platform counterparts, and before a commit or PR to audit the changed set for missed companion updates. Skip pre-edit history when the task already names the complete target set and direct path or text search resolves it.
 ---
 
 # Find Related Files
 
 ## Overview
 
-Use `related-cli` as a lightweight context expansion step before editing,
-reviewing, or explaining a file. It ranks files that changed together in Git
-history, so it can surface tests, configs, docs, migrations, and companion code
-that text search may miss.
+Use `related-cli` as a lightweight context expansion step when the likely edit
+scope is incomplete. It ranks files that changed together in Git history, so it
+can surface tests, configs, docs, migrations, and companion code that text
+search may miss. If the task already identifies the complete edit set and
+direct search resolves it, skip the pre-edit history query. A single changed-set
+query can still be useful before a commit or PR as a completeness audit.
 
 ## Workflow
 
-Extract the explicit task scope before using history: named components, screens,
-platforms, layers, and tests. Search paths or source text for every explicit
-target. Explicit task requirements override the ranking.
+First extract the explicit task scope: named components, screens, platforms,
+layers, and tests. Search paths or source text for every explicit target. Use
+history only when companion-file scope remains uncertain.
+Explicit task requirements override the ranking.
 
-Run from the repository root when possible:
+## Pre-commit and pre-PR audit
+
+Before committing or opening a PR, aggregate the current changed set once. Use
+the first form for unstaged edits and the second for staged edits:
+
+```sh
+env npm_config_loglevel=error npx -y --package related-cli@latest related diff --top 20
+env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20
+```
+
+Do not query every changed file separately. Compare the candidates with the task
+and current diff, then directly inspect likely omissions such as documentation,
+tests, configuration, generated metadata, migrations, and cross-platform
+counterparts. A ranking alone is not a reason to edit a file. If both staged and
+unstaged changes exist, audit each set once.
+
+## Query discipline
+
+For a seed-file lookup, run:
 
 ```sh
 env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20
 ```
 
-Use `--repo PATH` only when querying another checkout from outside that repo:
+Run from the repository root when possible. Use `--repo PATH` only when querying
+another checkout from outside that repository:
 
 ```sh
 env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --repo /path/to/repo --top 20
 ```
 
-For staged edits, ask for related files for the changed set:
+Run the seed query once. Do not repeat an identical query. Then use direct path
+or source-text search to resolve every explicit target. Default to one related
+query per task; run at most one additional query only when a genuinely
+independent surface remains unresolved after the first result and direct
+search. Stop querying once the requested edit scope is clear.
 
-```sh
-env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20
-```
-
-When a task spans independent concepts or surfaces, query one representative
-anchor for each instead of relying on a single seed file. Open the strongest
-relevant results before making edits, but treat them only as additional
-discovery candidates:
+Open the strongest relevant results before making edits, but treat them only as
+additional discovery candidates:
 
 - Do not drop an explicit target because it is absent from the ranking.
 - Do not substitute a similarly named result for a requested target.

@@ -20,6 +20,8 @@ The narrower position for `related` is:
 - no source parsing, imports, AST, symbols, embeddings, or file contents
 - direct co-change and Personalized PageRank over the co-change graph
 - `related query <file>` compact text output for LLM tools
+- `related diff [--staged]` changed-set aggregation for pre-commit and pre-PR
+  omission audits
 - `related explain <a> <b>` evidence commits
 - built-in holdout evaluation with target-local `on-demand` and research
   `global` query shapes plus `direct`, `pagerank`, and `path` baselines
@@ -32,7 +34,7 @@ based only on historical co-edits?"
 
 | Tool | Publicly described purpose | Local CLI | MCP / agent surface | Uses Git co-change | Uses source parsing | PageRank / graph centrality | Built-in related-file query | Built-in holdout eval | Notes |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `related` | Rank related files from Git co-change history | Yes | Not yet | Yes | No | Yes, Personalized PageRank on co-change graph | Yes | Yes | Single-purpose, content-blind, works for docs/configs/prompts as well as code |
+| `related` | Rank related files from Git co-change history | Yes | Not yet | Yes | No | Yes, Personalized PageRank on co-change graph | `query` plus changed-set `diff` | Yes | Single-purpose, content-blind, works for docs/configs/prompts as well as code |
 | LaserOwl | Catch missing files in an AI agent's plan using commit history | Not clear from public page | Yes | Yes | Not emphasized | Not publicly clear | Plan-level `evaluate_plan`, not a simple CLI query | Not publicly clear | Very close problem framing; appears more product/hosted and plan-completeness oriented |
 | Glaux | MCP/REST graph intelligence and risk context for coding agents | Not clear from public page | Yes | Yes | Yes | Yes | Agent context block, not a small Unix-style query CLI | Not publicly clear | Combines Git, static, and semantic graphs; explicitly broader than `related` |
 | Sourcebook | Check diffs for files an AI agent forgot to change | Yes | Yes | Yes | Yes | Yes, import-graph PageRank | Diff completeness check | Public benchmarks mentioned, methodology separate | Strong overlap on "forgotten files"; not content-blind and not just file-to-file retrieval |
