@@ -1,55 +1,14 @@
-# JSON output contract
+# Audit JSON output contract
 
-`query`, `audit`, `diff`, `explain`, and `eval` accept `--format json`.
-Successful JSON output is one object followed by a newline. Operational errors
-remain text on stderr and return a non-zero exit status.
-
-Every top-level object contains `schema_version`. Query-oriented commands retain
-schema 1. The audit contract starts at schema 2 so changed sets are represented
-as arrays rather than the legacy comma-separated `target` field.
-
-Schema 1 objects contain:
-
-```json
-{"schema_version":1}
-```
+`related audit --format json` writes one schema 2 object followed by a newline.
+Operational errors remain text on stderr and exit 1.
 
 Consumers should reject unsupported higher schema versions and ignore unknown
-fields in a supported version. Removing a field, renaming a field, or changing
-its type requires a schema-version increment. New optional or informational
-fields may be added without incrementing the version.
+fields in schema 2. Removing a field, renaming a field, or changing its type
+requires a schema-version increment. New informational fields may be added
+without an increment.
 
-## Query and diff
-
-`query` and `diff` share this shape:
-
-```json
-{
-  "schema_version": 1,
-  "target": "src/auth.ts",
-  "mode": "direct:on-demand:PackFast",
-  "related": [
-    {
-      "path": "src/auth.test.ts",
-      "score": 0.82,
-      "cochanges": 4,
-      "weight": 1.25,
-      "last_seen": "2026-08-01T12:00:00Z",
-      "reason": "direct_cochange",
-      "evidence": []
-    }
-  ],
-  "hints": []
-}
-```
-
-For `diff`, `target` is the comma-separated changed-file set used by the
-command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
-`weight`.
-
-## Audit
-
-`audit` uses schema 2:
+## Audit result
 
 ```json
 {
@@ -85,10 +44,10 @@ command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
     "exit_code": 3
   },
   "history_coverage": {
-    "backend": "PackFast",
-    "completeness": "latency-bounded",
-    "approximate": true,
-    "rename_tracking": "exact-blob-renames",
+    "backend": "GitCli",
+    "completeness": "target-window-exact",
+    "approximate": false,
+    "rename_tracking": "git-follow",
     "max_target_commits": 1000,
     "scan_commits": 0
   },
@@ -97,60 +56,48 @@ command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
 ```
 
 `scope` is `worktree`, `staged`, or `range:<revision-range>`. Worktree audit
-includes untracked, non-ignored paths in `seeds`. `supported_by` identifies the
-changed paths whose rankings contributed to a candidate. `cochanges` sums edge
-support across those paths, while `strongest_pair_cochanges` prevents one broad
-commit touching many seeds from looking like a repeatedly observed pair.
+includes untracked, non-ignored paths in `seeds`.
 
-`abstained` is true when no candidate met `minimum_confidence`. Confidence is a
-deterministic evidence-strength label, not a probability. `low` means the
-strongest changed-file pair occurred at most once, `medium` means 2-24 times,
-and `high` means at least 25 times. The high boundary was selected from
-chronological holdouts on three repositories; repository-local evaluation is
-still recommended.
+`supported_by` identifies the changed paths whose history contributed to a
+candidate. `cochanges` sums support across those paths.
+`strongest_pair_cochanges` is the strongest repeated changed-file/candidate
+relationship and determines the confidence band.
 
-`confidence_thresholds` makes those active boundaries machine-readable in both
-audit and audit-evaluation JSON.
+`abstained` is true when no candidate meets `minimum_confidence`. Confidence is
+deterministic evidence strength: low is one strongest-pair co-change, medium is
+2–24, and high is at least 25. Active boundaries are machine-readable in
+`confidence_thresholds`.
 
-`enforcement` is present only with `--fail-on-confidence`. It describes the
-displayed findings used for the decision. Normal audit discovery exits 0 even
-when candidates exist. Triggered enforcement writes the complete output and
-then exits 3; usage, repository, and runtime errors exit 1.
+`enforcement` appears only with `--fail-on-confidence`. Discovery exits 0 even
+when candidates exist. Triggered enforcement writes the complete object and
+then exits 3.
 
-`rename_tracking` is `git-follow` for exact committed history,
-`git-follow+diff-renames` when exact audit also mapped an uncommitted rename,
-`exact-blob-renames` for pack history that follows a unique deleted source with
-the same blob, and `exact-blob-renames+diff-renames` when pack audit also mapped
-an uncommitted rename. `diff-renames-only` and `current-path-only` describe
-advanced backends without pack/Git-follow tracking. Use exact accuracy for
-content-changing or ambiguous committed rename boundaries.
+## History coverage
 
-## Explain
+`history_coverage` describes the actual audit rather than the requested mode.
+Important `rename_tracking` values are:
 
-`explain` returns `a`, `b`, `related`, `cochanges`, `weight`, `last_seen`,
-`evidence`, and `hints` alongside `schema_version`.
+- `git-follow`: exact committed history with Git similarity detection;
+- `git-follow+diff-renames`: exact history plus an uncommitted rename mapping;
+- `exact-blob-renames`: bounded fast history with unambiguous identical-blob
+  rename tracking;
+- `exact-blob-renames+diff-renames`: fast committed and uncommitted rename
+  tracking.
 
-## Eval
+Use exact accuracy for content-changing or ambiguous committed renames.
 
-`eval` returns its repository and evaluation settings, task counters, and a
-`metrics` array alongside `schema_version`. Each metrics entry contains `mode`,
-`tasks`, `hit_rate_at_k`, `precision_at_k`, `recall_at_k`, `mrr`, and
-`avg_results`.
+## Omission evaluation
 
-With `--task audit`, eval uses schema 2 and returns
-`query_shape: "on-demand-leave-one-out"`, the configured
-`minimum_confidence`, audit eligibility counters, and metrics including
-`hits_at_k`, `avg_false_positives`, and `abstention_rate`. Its
-`confidence_metrics` array contains one row per mode and confidence band with
-candidate counts, correct candidates, candidate precision, tasks containing the
-band, task coverage, and the conditional hit rate. These rows are computed from
-the top-K candidate set before `minimum_confidence` filtering so one evaluation
-can compare all three bands.
+`related eval --task audit --format json` also uses schema 2. It reports task
+eligibility counters, chronological settings, and per-mode metrics including
+`hits_at_k`, `hit_rate_at_k`, `mrr`, `avg_false_positives`, and
+`abstention_rate`.
 
-Audit evaluation also returns `rename_tracking`, `training_renames`, and
-`test_diff_renames`. `rename_tracking` is
-`training-window+current-test-diff`: rename chains entirely inside training are
-canonicalized to the training-boundary path, and a rename in the commit being
-evaluated maps its destination to the known source path. Renames learned from a
-different held-out test commit are deliberately unavailable, preventing future
-or cross-holdout leakage.
+`confidence_metrics` contains one row per mode and confidence band with
+candidate count, correct count, candidate precision, task coverage, and
+conditional hit rate. Rows are computed before minimum-confidence filtering so
+one evaluation can compare all evidence bands.
+
+`rename_tracking` is `training-window+current-test-diff`. Training-window rename
+chains are canonicalized, and only the current held-out commit's rename mapping
+is available during its task. Renames from other held-out commits are excluded.

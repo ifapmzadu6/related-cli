@@ -77,21 +77,15 @@ pub(crate) fn run_with_writer<W: Write>(args: Vec<String>, out: &mut W) -> AnyRe
 fn print_usage<W: Write>(out: &mut W) -> AnyResult<()> {
     writeln!(
         out,
-        r#"related: content-blind related-file ranking from Git co-change history
+        r#"related: changed-set omission audits from Git co-change history
 
 Usage:
   related audit [--staged | --range REVISION_RANGE] [--top N] [--min-confidence LEVEL] [--fail-on-confidence LEVEL]
-  related query <file> [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS]
-  related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
-  related explain <file-a> <file-b> [--max-commits N]
-  related diff [--staged] [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS] [--max-commits N]
-  related eval [--repo PATH] [--query-shape on-demand|global] [--test-commits N] [--train-commits N]
+  related eval [--repo PATH] [--test-commits N] [--train-commits N]
 
-The graph is built on demand from files that changed together in Git commits.
-No source parsing, imports, embeddings, or file contents are used.
-Relative file paths are resolved from --repo (or the current directory), and
-query targets must be tracked by Git. Eval defaults to the target-local
-on-demand query shape; use --query-shape global for the research graph.
+Audit checks the current changed set for historically coupled files that may
+have been omitted. It uses Git history without reading source contents.
+Eval defaults to chronological changed-set omission evaluation.
 Run related <command> --help for command-specific options."#
     )?;
     Ok(())
@@ -222,12 +216,11 @@ fn print_eval_usage<W: Write>(out: &mut W) -> AnyResult<()> {
 
 Options:
   --repo PATH                 Repository or subdirectory (default: .)
-  --query-shape SHAPE         on-demand or global (default: on-demand)
-  --task TASK                 query or audit (default: query)
+  --task TASK                 Evaluation task (default: audit)
   --min-confidence LEVEL      Audit threshold: low, medium, or high (default: medium)
   --test-commits N            Holdout commits (default: 200)
   --train-commits N           Training commits (default: 1000)
-  --top N                     Evaluation cutoff (default: 10)
+  --top N                     Evaluation cutoff (default: 5)
   --format FORMAT             text or json (default: text)
   --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
   --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
@@ -1021,13 +1014,13 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let repo = flag_string(&parsed, "repo", ".");
     let test_commits = flag_positive_usize(&parsed, "test-commits", 200)?;
     let train_commits = flag_positive_usize(&parsed, "train-commits", 1000)?;
-    let top = flag_positive_usize(&parsed, "top", 10)?;
+    let top = flag_positive_usize(&parsed, "top", 5)?;
     let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
     let max_files = flag_positive_usize(&parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?;
     let half_life = flag_positive_f64(&parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?;
-    let task = flag_string(&parsed, "task", "query");
+    let task = flag_string(&parsed, "task", "audit");
     if !matches!(task.as_str(), "query" | "audit") {
-        return Err(format!("unknown eval task {task:?}; use query or audit").into());
+        return Err(format!("unknown eval task {task:?}; use audit").into());
     }
     let default_modes = if task == "audit" {
         "direct,pagerank"

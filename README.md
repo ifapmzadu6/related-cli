@@ -2,7 +2,7 @@
 
 # related-cli
 
-**Content-blind related-file ranking from Git co-change history**
+**Changed-set omission audits from Git co-change history**
 
 [![npm version](https://img.shields.io/npm/v/related-cli?logo=npm&logoColor=white&label=npm&color=cb3837)](https://www.npmjs.com/package/related-cli)
 [![CI](https://github.com/ifapmzadu6/related-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ifapmzadu6/related-cli/actions/workflows/ci.yml)
@@ -12,292 +12,162 @@
 
 </div>
 
-`related` audits a changed file set and ranks likely omissions using only Git
-co-change history. It can also query files individually as a small,
-supplementary context-expansion step before an agent or developer edits,
-reviews, or explains a tracked file.
+`related audit` checks a worktree, staged change, or revision range for likely
+omitted companion files. It uses only Git co-change history and never reads
+source contents, so the same signal covers code, tests, docs, configs,
+migrations, prompts, and generated metadata.
 
-It does not parse source code, imports, symbols, embeddings, or file contents.
-The same signal therefore works for code, tests, docs, configs, migrations,
-prompts, and other files tracked in Git.
+## How omission detection works
 
-## How it works
+Files that repeatedly changed together form a historical relationship. For the
+current changed set, `related audit` ranks unchanged files that were coupled to
+one or more changed files and reports:
 
-If two files repeatedly change in the same commit, they probably carry an
-operational relationship. `related` turns repository history into a weighted
-graph:
+- the candidate path;
+- the changed paths that support it;
+- co-change counts and example commits;
+- a deterministic `low`, `medium`, or `high` evidence band;
+- the actual history and rename coverage used by the run.
 
-- file = node
-- same-commit change = edge
-- large commits are down-weighted
-- older commits are time-decayed
+Weak one-off relationships are omitted by default. A candidate is a review
+prompt, not proof that the file must change.
 
-Queries can use direct co-change ranking or Personalized PageRank over the
-target-local co-change graph. Rankings are context hints, not proof that a file
-must change.
+## Run an audit
 
-`related audit` combines the historical relationships of the changed set,
-reports which changed files support each candidate, and omits weak one-off
-relationships by default. Its `low`, `medium`, and `high` confidence labels are
-deterministic evidence-strength bands, not probabilities. The conservative
-`high` boundary requires at least 25 co-changes for one changed-file/candidate
-pair and was selected from chronological holdouts on three repositories.
-
-## Skill installation
-
-The npm package ships a portable `find-related-files` skill for Codex and
-Claude Code. The skill does not vendor the binary or require a global install.
-Its installer pins normal query commands to the installed package version; run
-the installer again when you want to update it.
-
-The installed workflow keeps explicit task requirements, direct source search,
-and tests authoritative. Co-change rankings add candidates; they do not define
-the edit plan. It is especially useful as a pre-commit or pre-PR completeness
-audit: aggregate the changed set once, then check whether historically coupled
-docs, tests, configs, or companion implementations were unintentionally missed.
-
-### Codex
-
-Project install is recommended for shared repositories. Run this from the
-target project root:
+No global installation is required:
 
 ```sh
-npx -y --package related-cli@latest related-install-skill
-```
-
-This copies the skill to `.agents/skills/find-related-files`. Commit that
-directory when the workflow should travel with the repository.
-
-For an intentional user-level install:
-
-```sh
-npx -y --package related-cli@latest related-install-skill --user
-```
-
-Restart Codex after installing the skill.
-
-### Claude Code
-
-Project install:
-
-```sh
-npx -y --package related-cli@latest related-install-skill claude
-```
-
-This copies the skill to `.claude/skills/find-related-files`.
-
-User-level install:
-
-```sh
-npx -y --package related-cli@latest related-install-skill claude --user
-```
-
-Claude Code can load the skill automatically from its description, or you can
-invoke it directly with `/find-related-files`.
-
-## CLI usage
-
-The skill is the intended entry point for agent use. The CLI is also available
-directly through the npm package:
-
-```sh
-npx -y --package related-cli@latest related query src/auth.ts --top 20
+# Unstaged, staged, and untracked non-ignored worktree changes
 npx -y --package related-cli@latest related audit
+
+# Staged changes only
 npx -y --package related-cli@latest related audit --staged
+
+# A pull-request or branch range
 npx -y --package related-cli@latest related audit --range main..HEAD
-npx -y --package related-cli@latest related audit --staged --fail-on-confidence high
 ```
 
-The commands are:
+Commands use the current Git repository by default. Use `--repo PATH` to audit
+another checkout.
 
-| Command | Purpose |
-|---|---|
-| `related audit [--staged\|--range RANGE]` | Audit a changed set for likely omitted companion files |
-| `related query <file>` | Rank files related to one tracked file |
-| `related explain <file-a> <file-b>` | Show direct co-change evidence for a pair |
-| `related diff [--staged]` | Legacy changed-set aggregation without confidence filtering |
-| `related eval [--task query\|audit]` | Run a chronological holdout evaluation |
-
-Run `related <command> --help` for the complete option list.
-
-### Supported npm platforms
-
-The npm package bundles native binaries for Node.js 14 or newer on:
-
-- macOS: Apple silicon (`arm64`) and Intel (`x64`)
-- Linux: `arm64` and `x64`
-- Windows: `arm64` and `x64`
-
-On another operating system or CPU architecture, the npm wrapper exits with a
-message listing the supported platform keys.
-
-### Paths and repositories
-
-Commands use the current directory's Git repository by default. Relative file
-arguments are resolved from that directory, so querying from a repository
-subdirectory works as expected.
-
-Use `--repo PATH` to target another repository or to make its path the base for
-relative file arguments:
+The default output contains at most five medium-or-higher candidates. Useful
+controls include:
 
 ```sh
-npx -y --package related-cli@latest related query src/auth.ts --repo /path/to/repo
+related audit --top 10
+related audit --min-confidence high
+related audit --evidence 3
+related audit --format json
 ```
 
-Query targets must be tracked by Git. Typos and paths outside the repository
-are reported as errors. UTF-8 file names, including non-ASCII names, are
-supported; Git paths that are not valid UTF-8 are rejected because the text
-protocol is UTF-8.
+## Confidence and enforcement
 
-### History backends
+Confidence is evidence strength rather than probability:
 
-The default `pack-fast` backend reads SHA-1 object storage directly and uses a
-latency-bounded history scan. It is optimized for quick agent calls and can stop
-before an exact full-history walk.
+- `low`: the strongest changed-file/candidate pair occurred once;
+- `medium`: it occurred 2–24 times;
+- `high`: it occurred at least 25 times.
 
-- Use `--history-backend git` when exact Git history is more important than
-  latency.
-- Use `--history-backend pack-scan` for a deeper pack-only scan.
-- An unsupported default object format or storage layout automatically falls
-  back to `git` and emits a hint.
-- Pack readers reject an individual decompressed Git object larger than 256 MiB;
-  the default backend falls back to `git` if it encounters one.
-- Pack readers reject delta chains deeper than 128 objects and changed-file
-  trees deeper than 256 directories.
-- Git subprocess output is capped at 64 MiB per invocation to avoid unbounded
-  memory use on unusually broad histories.
-- An explicitly requested incompatible backend returns an error.
+The high boundary was selected from chronological omission holdouts on three
+repositories. It is conservative and intentionally has limited coverage.
+Evaluate the target repository before enabling enforcement.
 
-The Git backend is path-exact and follows similarity-detected file renames.
-Pack backends follow a committed rename when exactly one deleted source has the
-same blob as the new path; ambiguous copies and content-changing renames are
-left for exact mode. No backend creates a persistent index.
+Audit discovery exits 0 even when it prints candidates. Enforcement is
+explicit:
 
-For normal use, prefer the stable accuracy levels instead of selecting an
-implementation backend directly:
+```sh
+related audit --staged --accuracy exact --fail-on-confidence high
+```
+
+Exit codes are stable:
+
+- `0`: audit completed without an enforced finding;
+- `3`: at least one displayed candidate met the enforcement threshold;
+- `1`: usage, repository, or runtime error.
+
+The complete result is written before exit 3.
+
+## Fast and exact history
 
 ```sh
 related audit --accuracy fast
 related audit --accuracy exact
 ```
 
-`fast` uses the latency-bounded default and can fall back to Git. It maps an
-uncommitted staged rename to its old history path and follows unambiguous,
-content-identical committed renames directly from pack data. `exact` uses Git's
-exact target-history selection and also follows similarity-detected renames
-whose contents changed, combining old and new target paths into one relationship
-chain. `--history-backend` remains available for advanced measurement and
-compatibility.
+`fast` uses a bounded pack-native history reader. It follows an unambiguous
+committed rename when the old and new paths have identical content and maps an
+uncommitted rename to its old history path. Unsupported repositories fall back
+to Git with a visible hint.
 
-### Ranking controls
+`exact` uses Git history and similarity-based rename detection. Use it for CI,
+content-changing renames, and ambiguous rename boundaries. Every audit reports
+its actual coverage in `history_coverage`.
 
-Common controls include:
+## Evaluate omission detection
 
-```sh
-related query src/auth.ts --top 20 --evidence 3
-related query src/auth.ts --max-commits 500 --half-life-days 180
-related query src/auth.ts --mode pagerank
-related query src/auth.ts --format json
-```
-
-If broad dependency, release, formatting, generated, or initial commits dominate
-the results, inspect evidence and retry with a smaller commit-size limit plus
-exclusions:
+The evaluator hides one known file from each eligible historical multi-file
+change, uses the remaining files as the changed set, and checks whether the
+audit recovers the omission. Training commits are strictly older than held-out
+commits, and rename information does not cross holdout boundaries.
 
 ```sh
-related query src/auth.ts \
-  --top 20 \
-  --max-files-per-commit 10 \
-  --exclude '*.lock,*-lock.*,*lockb,.github/workflows/*' \
-  --evidence 3
+related eval --task audit \
+  --test-commits 200 \
+  --train-commits 1000 \
+  --top 5 \
+  --min-confidence medium
 ```
 
-The default compact text output contains ranked paths and short `co=` counts.
-Use `--format json` when another tool needs structured output. Query-oriented
-commands retain schema 1; `audit` and audit evaluation use schema 2. See
-[the JSON output contract](docs/json-output.md). Evidence is opt-in. Follow any
-emitted `hint:` lines before opening a large number of files.
+It reports hit rate, false positives, abstention, and precision and coverage for
+each confidence band. See [MEASUREMENTS.md](MEASUREMENTS.md) for the recorded
+three-repository omission results.
 
-### Evaluation
+## CI and hooks
 
-`related eval` defaults to `--query-shape on-demand`, which reconstructs the
-target-local graph shape used by normal queries:
+The repository's own pull-request workflow runs a full-history exact audit with
+high-confidence enforcement. See [CI and hook integration](docs/ci-integration.md)
+for a reusable GitHub Actions job and local staged-change hook.
+
+Machine consumers should use the [audit JSON contract](docs/json-output.md),
+which documents schema 2, history coverage, enforcement fields, and exit codes.
+
+## Agent skill installation
+
+The npm package ships a `find-related-files` skill that performs one changed-set
+omission audit before a commit or pull request. It does not install a global
+binary.
+
+Codex project install:
 
 ```sh
-related eval --test-commits 200 --train-commits 1000 --top 10
+npx -y --package related-cli@latest related-install-skill
 ```
 
-`--query-shape global` builds one graph over the entire training window. It is
-useful for measuring the potential of the history signal but should not be
-presented as production-query accuracy.
-
-Audit evaluation chronologically hides one known file from each eligible
-multi-file commit and tests whether the remaining changed set recovers it:
+Claude Code project install:
 
 ```sh
-related eval --task audit --test-commits 200 --train-commits 1000 --top 5
+npx -y --package related-cli@latest related-install-skill claude
 ```
 
-Audit evaluation also reports candidate precision and task coverage for each
-confidence band. Rename aliases learned inside the training window are combined
-without crossing the holdout boundary. A rename in the currently evaluated
-commit is mapped like an uncommitted diff, but renames from other held-out test
-commits are not reused. Run the evaluator on the target repository before
-enabling enforcement.
+Use `--user` only for an intentional user-level install. Rerun the installer to
+update the pinned package version in an existing installed skill.
 
-### CI enforcement
+## Supported npm platforms
 
-Audit is discovery-only by default and exits 0 even when it returns candidates.
-`--fail-on-confidence LEVEL` opts into enforcement: the audit output is still
-written, then the process exits 3 when any displayed candidate meets the chosen
-level. Operational and usage errors exit 1. A safe starting point is:
+The package bundles native binaries for Node.js 14 or newer on:
 
-```sh
-related audit --staged --accuracy exact --fail-on-confidence high
-```
-
-The failure threshold cannot be lower than `--min-confidence`. Enforcement is
-never enabled implicitly.
-
-See [CI and hook integration](docs/ci-integration.md) for a full-history GitHub
-Actions job and non-blocking or enforcing staged-change hooks.
+- macOS: Apple silicon and Intel;
+- Linux: `arm64` and `x64`;
+- Windows: `arm64` and `x64`.
 
 ## Limitations
 
-- New files and repositories with little history have weak or no co-change
-  evidence.
+- New files and repositories with little history provide weak evidence.
 - Squashed histories and broad mechanical commits reduce signal quality.
-- Fast pack history follows only unambiguous, content-identical committed
-  renames. Use `--accuracy exact` for content-changing or ambiguous rename
-  boundaries.
-- Deleted paths are not returned as related-file candidates.
-- Co-change is correlation, not a requirement to edit every returned file.
-- Audit confidence is an evidence band rather than a probability. The measured
-  high boundary is conservative but not universally reliable; use the built-in
-  audit evaluation before enforcing it in CI.
-- End-to-end agent accuracy improvement is not yet established; the initial
-  three-task paired pilot found one efficiency win, one regression, and one
-  neutral functional result. One guarded rerun corrected the known regression,
-  but that is not enough to establish a general effect.
-- The default `pack-fast` backend favors latency over an exact complete walk.
-
-## Measurements and comparisons
-
-The detailed research material is kept separate from the user guide:
-
-- [BENCHMARK.md](BENCHMARK.md) describes the evaluator and a reproducible VS
-  Code benchmark.
-- [MEASUREMENTS.md](MEASUREMENTS.md) records accuracy, latency, history-window,
-  token, and backend experiments.
-- [COMPARISON.md](COMPARISON.md) compares the project with nearby tools and
-  documents the scope of those comparisons.
-- [The Codex editing pilot](experiments/agent-ab/results/2026-08-16-pilot.md)
-  compares three tasks with and without the lookup; its
-  [guardrail follow-up](experiments/agent-ab/results/2026-08-16-guardrail-follow-up.md)
-  checks the known failure once more.
-
-Reproduction helpers are available in `scripts/compare.sh`,
-`scripts/speed_compare.py`, and `scripts/external_tool_compare.sh`.
+- Co-change is correlation; inspect the task and diff before editing a candidate.
+- Deleted paths are not returned as omission candidates.
+- Fast mode follows only unambiguous, content-identical committed renames.
+- Confidence boundaries require repository-local calibration for strict CI use.
 
 ## License
 

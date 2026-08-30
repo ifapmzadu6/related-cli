@@ -1,4 +1,4 @@
 interface:
-  display_name: "Find Related Files"
-  short_description: "Find Git co-change companion files."
-  default_prompt: "Use $find-related-files when edit scope is uncertain, or to audit a changed set once for missed docs, tests, configs, or counterparts."
+  display_name: "Audit Related Files"
+  short_description: "Audit changed sets for missing companion files."
+  default_prompt: "Use $find-related-files to audit this changed set once for omitted tests, docs, configs, migrations, metadata, or platform counterparts."
