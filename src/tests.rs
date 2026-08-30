@@ -10,7 +10,7 @@ use crate::history::{
     git_log_direct_for_target, git_target_commit_hash_input, git_target_commit_seeds,
 };
 use crate::model::*;
-use crate::pack::git_pack_scan_direct_for_target;
+use crate::pack::{git_pack_fast_direct_for_target, git_pack_scan_direct_for_target};
 use crate::path_utils::pair_key;
 use std::env;
 use std::fs;
@@ -979,6 +979,178 @@ fn cli_audit_evaluation_parses_rename_boundaries() {
 }
 
 #[test]
+fn pack_fast_follows_unambiguous_exact_blob_renames() {
+    let repo = new_test_repo();
+    let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+    write_commit(
+        &repo,
+        "old pair one",
+        &[("old.md", old), ("companion.md", "one\n")],
+    );
+    write_commit(
+        &repo,
+        "old pair two",
+        &[
+            ("old.md", &format!("{old}eleven\n")),
+            ("companion.md", "two\n"),
+        ],
+    );
+    git(&repo, &["mv", "old.md", "middle.md"]);
+    fs::write(repo.join("companion.md"), "three\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "first pure rename with companion"]);
+    git(&repo, &["mv", "middle.md", "new.md"]);
+    fs::write(repo.join("companion.md"), "four\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(
+        &repo,
+        &["commit", "-m", "second pure rename with companion"],
+    );
+    write_commit(
+        &repo,
+        "new pair",
+        &[
+            ("new.md", &format!("{old}after\n")),
+            ("companion.md", "five\n"),
+        ],
+    );
+
+    let config = OnDemandConfig {
+        backend: OnDemandBackend::PackFast,
+        backend_explicit: false,
+        max_commits: 20,
+        since: None,
+        max_files_per_commit: 10,
+        half_life_days: 365.0,
+        evidence_limit: 0,
+        jobs: 1,
+        jobs_explicit: false,
+        scan_commits: 0,
+    };
+    let results =
+        git_pack_fast_direct_for_target(repo.to_str().unwrap(), "new.md", &config, 10).unwrap();
+    let companion = results
+        .iter()
+        .find(|result| result.path == "companion.md")
+        .unwrap();
+    assert_eq!(companion.cochanges, 5);
+    assert!(results.iter().all(|result| result.path != "old.md"));
+
+    let mut pagerank_output = Vec::new();
+    run_with_writer(
+        vec![
+            "query".to_string(),
+            "new.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "fast".to_string(),
+            "--mode".to_string(),
+            "pagerank".to_string(),
+            "--top".to_string(),
+            "10".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ],
+        &mut pagerank_output,
+    )
+    .unwrap();
+    let pagerank: serde_json::Value = serde_json::from_slice(&pagerank_output).unwrap();
+    let companion = pagerank["related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["path"] == "companion.md")
+        .unwrap();
+    assert_eq!(companion["cochanges"], 5);
+    assert!(
+        pagerank["related"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| result["path"] != "old.md")
+    );
+
+    fs::write(repo.join("new.md"), "staged\n").unwrap();
+    git(&repo, &["add", "new.md"]);
+    let mut output = Vec::new();
+    run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--staged".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "fast".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ],
+        &mut output,
+    )
+    .unwrap();
+    let audit: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(audit["candidates"][0]["path"], "companion.md");
+    assert_eq!(audit["candidates"][0]["cochanges"], 5);
+    assert_eq!(
+        audit["history_coverage"]["rename_tracking"],
+        "exact-blob-renames"
+    );
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn pack_fast_abstains_from_ambiguous_exact_blob_sources() {
+    let repo = new_test_repo();
+    let shared = "same content\nacross both paths\n";
+    write_commit(
+        &repo,
+        "ambiguous pair one",
+        &[
+            ("old-one.md", shared),
+            ("old-two.md", shared),
+            ("companion.md", "one\n"),
+        ],
+    );
+    write_commit(
+        &repo,
+        "ambiguous pair two",
+        &[
+            ("old-one.md", shared),
+            ("old-two.md", shared),
+            ("companion.md", "two\n"),
+        ],
+    );
+    git(&repo, &["mv", "old-one.md", "new.md"]);
+    git(&repo, &["rm", "old-two.md"]);
+    fs::write(repo.join("companion.md"), "three\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "ambiguous rename sources"]);
+
+    let config = OnDemandConfig {
+        backend: OnDemandBackend::PackFast,
+        backend_explicit: false,
+        max_commits: 20,
+        since: None,
+        max_files_per_commit: 10,
+        half_life_days: 365.0,
+        evidence_limit: 0,
+        jobs: 1,
+        jobs_explicit: false,
+        scan_commits: 0,
+    };
+    let results =
+        git_pack_fast_direct_for_target(repo.to_str().unwrap(), "new.md", &config, 10).unwrap();
+    let companion = results
+        .iter()
+        .find(|result| result.path == "companion.md")
+        .unwrap();
+    assert_eq!(companion.cochanges, 1);
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
 fn staged_rename_audit_uses_the_old_path_history_in_fast_and_exact_modes() {
     let repo = new_test_repo();
     write_commit(
@@ -1000,7 +1172,7 @@ fn staged_rename_audit_uses_the_old_path_history_in_fast_and_exact_modes() {
     git(&repo, &["mv", "src/old.md", "src/new.md"]);
 
     for (accuracy, expected_tracking) in [
-        ("fast", "diff-renames-only"),
+        ("fast", "exact-blob-renames+diff-renames"),
         ("exact", "git-follow+diff-renames"),
     ] {
         let mut output = Vec::new();

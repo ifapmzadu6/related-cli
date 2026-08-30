@@ -131,9 +131,34 @@ commit itself, and one commit after it. Query and audit both returned the
 companion with four co-changes and did not return the old target path as a
 candidate. A second fixture staged an uncommitted rename after two historical
 co-changes; both fast and exact audit attributed the companion to the visible
-new path with two co-changes. Fast audit reports `diff-renames-only` for that
-case because its older committed pack history remains current-path-only; exact
-reports `git-follow+diff-renames`.
+new path with two co-changes. Fast audit reports
+`exact-blob-renames+diff-renames` for that case; exact reports
+`git-follow+diff-renames`.
+
+On 2026-08-31 JST, fast pack history gained a bounded, pack-native detector for
+committed renames where exactly one path disappears with the same blob that
+appears at the new path. It canonicalizes the selected old target back to the
+requested current name. If two deleted paths share that blob, it abstains from
+following either; content-changing renames remain exact-mode work. The tree
+search stops after 20,000 entries to bound pathological repositories.
+
+The two-boundary pure-rename fixture recovered all five co-change commits in
+fast graph/direct paths. An ambiguous fixture with two identical deleted sources retained
+only the current-path commit in fast mode instead of attaching an arbitrary old
+history. On the real `vscode-edge-devtools` R100 rename
+`src/host_beta/messageRouter.ts` to `src/host/messageRouter.ts`, fast and exact
+returned the same top-five paths and co-change counts. Twenty sequential query
+runs measured:
+
+| accuracy | median | p95 | max |
+|---|---:|---:|---:|
+| `fast` | 34.21 ms | 66.90 ms | 89.82 ms |
+| `exact` | 61.34 ms | 74.70 ms | 82.72 ms |
+
+The twenty-file local audit was also rerun after the detector: fast measured
+61.85 ms median and 79.02 ms p95; exact measured 114.84 ms median and 122.64 ms
+p95. Both remained under the provisional 500 ms warm p95 budget. Fast had one
+667.53 ms cold/noisy maximum, consistent with the earlier non-SLA caveat.
 
 ### Rename-aware chronological audit evaluation
 
@@ -162,12 +187,10 @@ evidence for correct rename accounting, not a claim that canonicalization
 always improves every ranking metric.
 
 The evaluation canonicalizer is intentionally not injected into live fast
-queries. It reads a bounded global name-status history, whereas `pack-fast`
-keeps its latency advantage by walking one literal target path directly from
-Git objects. A Git `--follow` prepass would make fast pay much of exact mode's
-selection cost. Until a pack-native rename detector is measured, live audits
-keep the explicit contract: fast is current-path-only for committed history and
-exact is rename-aware.
+queries because its bounded global name-status read would make fast pay much of
+exact mode's selection cost. The pack-native exact-blob detector above instead
+extends fast while preserving a narrower, explicitly reported contract; exact
+mode remains necessary for similarity-based rename tracking.
 
 Reproduction examples:
 

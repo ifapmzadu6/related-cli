@@ -817,6 +817,15 @@ fn history_coverage(config: &OnDemandConfig, diff_rename_mapping: bool) -> Histo
             } else {
                 "git-follow".to_string()
             }
+        } else if matches!(
+            config.backend,
+            OnDemandBackend::PackFast | OnDemandBackend::PackScan
+        ) {
+            if diff_rename_mapping {
+                "exact-blob-renames+diff-renames".to_string()
+            } else {
+                "exact-blob-renames".to_string()
+            }
         } else if diff_rename_mapping {
             "diff-renames-only".to_string()
         } else {

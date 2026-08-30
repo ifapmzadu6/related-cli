@@ -26,6 +26,7 @@ const MAX_COMMIT_CACHE_ENTRIES: usize = 32_768;
 const MAX_TREE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TREE_CACHE_ENTRIES: usize = 8_192;
 const MAX_PATH_CACHE_ENTRIES: usize = 65_536;
+const MAX_EXACT_RENAME_TREE_ENTRIES: usize = 20_000;
 
 pub(crate) fn git_log_for_target_pack_scan(
     repo: &str,
@@ -136,8 +137,9 @@ fn pack_log_for_target_inner(
         since_seconds,
         scan_commits,
         latency_bounded_scan,
-        |store, id, raw| {
-            let files = pack_changed_files_for_commit(store, raw, diff_file_limit)?;
+        |store, id, raw, selected_path| {
+            let mut files = pack_changed_files_for_commit(store, raw, diff_file_limit)?;
+            canonicalize_pack_target_path(&mut files, selected_path, &target);
             commits.push(Commit {
                 hash: id.to_hex(),
                 unix_time: raw.time,
@@ -197,7 +199,6 @@ fn pack_direct_for_target_inner(
         if selected.len() >= PACK_DIRECT_PARALLEL_MIN_COMMITS {
             return pack_direct_for_selected_parallel(
                 &store,
-                &target,
                 &selected,
                 max_files,
                 half_life,
@@ -205,9 +206,7 @@ fn pack_direct_for_target_inner(
                 config.jobs,
             );
         }
-        return pack_direct_for_selected_serial(
-            &mut store, &target, &selected, max_files, half_life, top,
-        );
+        return pack_direct_for_selected_serial(&mut store, &selected, max_files, half_life, top);
     }
 
     let mut latest = None;
@@ -225,7 +224,7 @@ fn pack_direct_for_target_inner(
         since_seconds,
         scan_commits,
         latency_bounded_scan,
-        |store, id, raw| {
+        |store, id, raw, selected_path| {
             pack_changed_files_for_commit_into(
                 store,
                 raw,
@@ -245,7 +244,7 @@ fn pack_direct_for_target_inner(
             let mut evidence = None;
 
             for other in &files {
-                if other == &target {
+                if other == selected_path {
                     continue;
                 }
                 let pair = pairs.entry(other.clone()).or_default();
@@ -304,7 +303,7 @@ fn pack_collect_target_commits(
     since_seconds: Option<i64>,
     scan_commits: usize,
     latency_bounded_scan: bool,
-) -> AnyResult<Vec<(RawObjectId, RawCommit)>> {
+) -> AnyResult<Vec<(RawObjectId, RawCommit, String)>> {
     let mut selected = Vec::with_capacity(max_commits.min(1024));
     pack_visit_target_commits(
         store,
@@ -313,8 +312,8 @@ fn pack_collect_target_commits(
         since_seconds,
         scan_commits,
         latency_bounded_scan,
-        |_, id, raw| {
-            selected.push((id, raw.clone()));
+        |_, id, raw, selected_path| {
+            selected.push((id, raw.clone(), selected_path.to_string()));
             Ok(())
         },
     )?;
@@ -323,13 +322,12 @@ fn pack_collect_target_commits(
 
 fn pack_direct_for_selected_serial(
     store: &mut RawGitStore,
-    target: &str,
-    selected: &[(RawObjectId, RawCommit)],
+    selected: &[(RawObjectId, RawCommit, String)],
     max_files: usize,
     half_life: f64,
     top: usize,
 ) -> AnyResult<Vec<ResultItem>> {
-    let Some((_, latest_commit)) = selected.first() else {
+    let Some((_, latest_commit, _)) = selected.first() else {
         return Ok(Vec::new());
     };
     let latest = latest_commit.time;
@@ -337,10 +335,10 @@ fn pack_direct_for_selected_serial(
     let mut partial = PackDirectPartial::new(top);
     let mut files = Vec::with_capacity(max_files.saturating_add(1));
     let mut prefix = Vec::new();
-    for (_, raw) in selected {
+    for (_, raw, selected_path) in selected {
         pack_direct_add_commit_no_evidence(
             store,
-            target,
+            selected_path,
             raw,
             max_files,
             half_life,
@@ -360,14 +358,13 @@ fn pack_direct_for_selected_serial(
 
 fn pack_direct_for_selected_parallel(
     template: &RawGitStore,
-    target: &str,
-    selected: &[(RawObjectId, RawCommit)],
+    selected: &[(RawObjectId, RawCommit, String)],
     max_files: usize,
     half_life: f64,
     top: usize,
     jobs: usize,
 ) -> AnyResult<Vec<ResultItem>> {
-    let Some((_, latest_commit)) = selected.first() else {
+    let Some((_, latest_commit, _)) = selected.first() else {
         return Ok(Vec::new());
     };
     let latest = latest_commit.time;
@@ -383,10 +380,10 @@ fn pack_direct_for_selected_parallel(
                 let mut partial = PackDirectPartial::new(top);
                 let mut files = Vec::with_capacity(max_files.saturating_add(1));
                 let mut prefix = Vec::new();
-                for (_, raw) in chunk {
+                for (_, raw, selected_path) in chunk {
                     pack_direct_add_commit_no_evidence(
                         &mut store,
-                        target,
+                        selected_path,
                         raw,
                         max_files,
                         half_life,
@@ -453,6 +450,17 @@ fn pack_direct_add_commit_no_evidence(
     Ok(())
 }
 
+fn canonicalize_pack_target_path(files: &mut [String], selected_path: &str, target: &str) {
+    if selected_path == target {
+        return;
+    }
+    for file in files {
+        if file == selected_path {
+            target.clone_into(file);
+        }
+    }
+}
+
 fn pack_direct_merge_partial(target: &mut PackDirectPartial, source: PackDirectPartial) {
     target.target_weight += source.target_weight;
     for (path, source_pair) in source.pairs {
@@ -502,7 +510,7 @@ fn pack_visit_target_commits(
     since_seconds: Option<i64>,
     scan_commits: usize,
     latency_bounded_scan: bool,
-    mut visitor: impl FnMut(&mut RawGitStore, RawObjectId, &RawCommit) -> AnyResult<()>,
+    mut visitor: impl FnMut(&mut RawGitStore, RawObjectId, &RawCommit, &str) -> AnyResult<()>,
 ) -> AnyResult<()> {
     let mut target_path = PackTargetPath::new(target);
     let head = store.head_id()?;
@@ -537,7 +545,11 @@ fn pack_visit_target_commits(
 
         let decision = pack_path_history_decision(store, &mut target_path, &commit)?;
         if decision.include {
-            visitor(store, item.id, &commit)?;
+            let selected_path = decision
+                .selected_path
+                .as_deref()
+                .ok_or("pack path decision omitted the selected target path")?;
+            visitor(store, item.id, &commit, selected_path)?;
             selected += 1;
             last_hit_scan = scanned;
             if max_commits > 0 && selected >= max_commits {
@@ -571,6 +583,7 @@ struct PackWalkParent {
 
 struct PackPathDecision {
     include: bool,
+    selected_path: Option<String>,
     first_parent: Option<PackWalkParent>,
     extra_parents: Vec<PackWalkParent>,
 }
@@ -579,14 +592,16 @@ impl PackPathDecision {
     fn new(include: bool) -> Self {
         Self {
             include,
+            selected_path: None,
             first_parent: None,
             extra_parents: Vec::new(),
         }
     }
 
-    fn one_parent(include: bool, parent: PackWalkParent) -> Self {
+    fn one_parent(include: bool, selected_path: Option<String>, parent: PackWalkParent) -> Self {
         Self {
             include,
+            selected_path,
             first_parent: Some(parent),
             extra_parents: Vec::new(),
         }
@@ -619,6 +634,7 @@ fn pack_push_walk_parent(
 }
 
 struct PackTargetPath {
+    path: String,
     components: Vec<Vec<u8>>,
     entry_cache: HashMap<RawObjectId, Option<RawTreeEntry>>,
     child_cache: HashMap<(RawObjectId, usize), Option<RawTreeEntry>>,
@@ -627,6 +643,7 @@ struct PackTargetPath {
 impl PackTargetPath {
     fn new(target: &str) -> Self {
         Self {
+            path: target.to_string(),
             components: target
                 .as_bytes()
                 .split(|byte| *byte == b'/')
@@ -636,6 +653,19 @@ impl PackTargetPath {
             entry_cache: HashMap::default(),
             child_cache: HashMap::default(),
         }
+    }
+
+    fn set_path(&mut self, target: String) {
+        self.path = target;
+        self.components = self
+            .path
+            .as_bytes()
+            .split(|byte| *byte == b'/')
+            .filter(|component| !component.is_empty())
+            .map(|component| component.to_vec())
+            .collect();
+        self.entry_cache.clear();
+        self.child_cache.clear();
     }
 
     fn entry_at_path(
@@ -732,8 +762,10 @@ fn pack_path_history_decision(
     commit: &RawCommit,
 ) -> AnyResult<PackPathDecision> {
     if commit.parents.is_empty() {
+        let include = target.entry_at_path(store, commit.tree)?.is_some();
         return Ok(PackPathDecision {
-            include: target.entry_at_path(store, commit.tree)?.is_some(),
+            include,
+            selected_path: include.then(|| target.path.clone()),
             first_parent: None,
             extra_parents: Vec::new(),
         });
@@ -751,7 +783,7 @@ fn pack_path_history_decision(
                 time: parent_commit.time,
             };
             if treesame {
-                return Ok(PackPathDecision::one_parent(false, walk_parent));
+                return Ok(PackPathDecision::one_parent(false, None, walk_parent));
             } else {
                 decision.include |= new_exists;
                 decision.push_parent(walk_parent);
@@ -762,7 +794,101 @@ fn pack_path_history_decision(
     if !saw_parent {
         decision.include = target.entry_at_path(store, commit.tree)?.is_some();
     }
+    if decision.include {
+        decision.selected_path = Some(target.path.clone());
+        if commit.parents.len() == 1 {
+            let parent = commit.parents.first().ok_or("missing first parent")?;
+            let parent_commit = store.raw_commit(parent)?;
+            let old_entry = target.entry_at_path(store, parent_commit.tree)?;
+            let new_entry = target.entry_at_path(store, commit.tree)?;
+            if old_entry.is_none()
+                && let Some(new_entry) = new_entry.filter(|entry| !raw_tree_entry_is_tree(entry))
+                && let Some(source) = pack_find_exact_rename_source(
+                    store,
+                    parent_commit.tree,
+                    commit.tree,
+                    new_entry,
+                )?
+            {
+                target.set_path(source);
+            }
+        }
+    }
     Ok(decision)
+}
+
+fn pack_find_exact_rename_source(
+    store: &mut RawGitStore,
+    old_tree: RawObjectId,
+    new_tree: RawObjectId,
+    target_entry: RawTreeEntry,
+) -> AnyResult<Option<String>> {
+    let mut state = ExactRenameSearch {
+        target_entry,
+        new_tree,
+        visited_entries: 0,
+        source: None,
+        ambiguous_or_bounded: false,
+    };
+    let mut prefix = Vec::new();
+    pack_search_exact_rename_source(store, old_tree, &mut prefix, &mut state, 0)?;
+    if state.ambiguous_or_bounded {
+        Ok(None)
+    } else {
+        Ok(state.source)
+    }
+}
+
+struct ExactRenameSearch {
+    target_entry: RawTreeEntry,
+    new_tree: RawObjectId,
+    visited_entries: usize,
+    source: Option<String>,
+    ambiguous_or_bounded: bool,
+}
+
+fn pack_search_exact_rename_source(
+    store: &mut RawGitStore,
+    tree: RawObjectId,
+    prefix: &mut Vec<u8>,
+    state: &mut ExactRenameSearch,
+    depth: usize,
+) -> AnyResult<()> {
+    validate_tree_diff_depth(depth)?;
+    if state.ambiguous_or_bounded {
+        return Ok(());
+    }
+    let entries = store.tree_entries(tree)?;
+    for entry in entries.iter() {
+        state.visited_entries += 1;
+        if state.visited_entries > MAX_EXACT_RENAME_TREE_ENTRIES {
+            state.ambiguous_or_bounded = true;
+            return Ok(());
+        }
+        let prefix_len = prefix.len();
+        if !prefix.is_empty() {
+            prefix.push(b'/');
+        }
+        prefix.extend_from_slice(&entry.name);
+        if raw_tree_entry_is_tree(&entry.entry) {
+            pack_search_exact_rename_source(store, entry.entry.id, prefix, state, depth + 1)?;
+        } else if entry.entry == state.target_entry {
+            let path = decode_git_path(prefix)?;
+            let mut candidate = PackTargetPath::new(&path);
+            if candidate.entry_at_path(store, state.new_tree)?.is_none() {
+                if state.source.is_some() {
+                    state.ambiguous_or_bounded = true;
+                } else {
+                    state.source = Some(path);
+                }
+            }
+        }
+        prefix.truncate(prefix_len);
+        if state.ambiguous_or_bounded {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 fn raw_tree_entry_is_tree(entry: &RawTreeEntry) -> bool {
