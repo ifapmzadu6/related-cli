@@ -19,12 +19,14 @@ The narrower position for `related` is:
 - Git co-change history only
 - no source parsing, imports, AST, symbols, embeddings, or file contents
 - direct co-change and Personalized PageRank over the co-change graph
+- `related audit` changed-set omission checks with support attribution,
+  confidence filtering, and explicit abstention
 - `related query <file>` compact text output for LLM tools
-- `related diff [--staged]` changed-set aggregation for pre-commit and pre-PR
-  omission audits
+- legacy `related diff [--staged]` changed-set aggregation
 - `related explain <a> <b>` evidence commits
 - built-in holdout evaluation with target-local `on-demand` and research
-  `global` query shapes plus `direct`, `pagerank`, and `path` baselines
+  `global` query shapes, leave-one-out changed-set audit evaluation, and
+  `direct`, `pagerank`, and `path` baselines
 
 That makes it weaker than the larger systems for full code intelligence, but
 cleaner for the specific job of "given this file, what should an agent read next
@@ -34,7 +36,7 @@ based only on historical co-edits?"
 
 | Tool | Publicly described purpose | Local CLI | MCP / agent surface | Uses Git co-change | Uses source parsing | PageRank / graph centrality | Built-in related-file query | Built-in holdout eval | Notes |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `related` | Rank related files from Git co-change history | Yes | Not yet | Yes | No | Yes, Personalized PageRank on co-change graph | `query` plus changed-set `diff` | Yes | Single-purpose, content-blind, works for docs/configs/prompts as well as code |
+| `related` | Audit changed sets and rank related files from Git co-change history | Yes | Not yet | Yes | No | Yes, Personalized PageRank on co-change graph | confidence-filtered `audit`, `query`, and legacy `diff` | Yes | Single-purpose, content-blind, works for docs/configs/prompts as well as code |
 | LaserOwl | Catch missing files in an AI agent's plan using commit history | Not clear from public page | Yes | Yes | Not emphasized | Not publicly clear | Plan-level `evaluate_plan`, not a simple CLI query | Not publicly clear | Very close problem framing; appears more product/hosted and plan-completeness oriented |
 | Glaux | MCP/REST graph intelligence and risk context for coding agents | Not clear from public page | Yes | Yes | Yes | Yes | Agent context block, not a small Unix-style query CLI | Not publicly clear | Combines Git, static, and semantic graphs; explicitly broader than `related` |
 | Sourcebook | Check diffs for files an AI agent forgot to change | Yes | Yes | Yes | Yes | Yes, import-graph PageRank | Diff completeness check | Public benchmarks mentioned, methodology separate | Strong overlap on "forgotten files"; not content-blind and not just file-to-file retrieval |
@@ -138,16 +140,18 @@ There are already close tools. The open space for `related` is not "no one uses
 co-change for agents." The open space is a smaller, composable tool:
 
 ```sh
+related audit --staged
 related query path/to/file
 related explain path/to/file other/file
-related eval
+related eval --task audit
 ```
 
 The practical bet is that many agents do not need a whole code-intelligence
-stack before every edit. They need a cheap first call that answers:
+stack before every edit. They need a cheap changed-set check that answers:
 
 ```text
-Based on how this repository actually evolved, what else should I inspect?
+Based on how this repository actually evolved, what likely companion file is
+missing from this change?
 ```
 
 That scope also keeps `related` usable outside source code, where AST and import

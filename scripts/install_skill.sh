@@ -85,7 +85,7 @@ trap cleanup EXIT
 cp -R "$skill_src/." "$tmp/"
 skill_file="$tmp/SKILL.md"
 awk -v package_ref="related-cli@$package_version" '
-  /related (query|diff)/ { gsub(/related-cli@latest/, package_ref) }
+  /related (audit|query|diff)/ { gsub(/related-cli@latest/, package_ref) }
   { print }
 ' "$skill_file" > "$skill_file.pinned"
 if cmp -s "$skill_file" "$skill_file.pinned"; then

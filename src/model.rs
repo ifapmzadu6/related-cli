@@ -114,6 +114,51 @@ pub(crate) struct QueryOutput {
     pub(crate) hints: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AuditCandidate {
+    pub(crate) path: String,
+    pub(crate) score: f64,
+    pub(crate) confidence: Confidence,
+    pub(crate) support_count: usize,
+    pub(crate) supported_by: Vec<String>,
+    pub(crate) cochanges: usize,
+    pub(crate) strongest_pair_cochanges: usize,
+    pub(crate) weight: f64,
+    pub(crate) last_seen: String,
+    pub(crate) reason: String,
+    pub(crate) evidence: Vec<Evidence>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HistoryCoverage {
+    pub(crate) backend: String,
+    pub(crate) completeness: String,
+    pub(crate) approximate: bool,
+    pub(crate) max_target_commits: usize,
+    pub(crate) scan_commits: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AuditOutput {
+    pub(crate) schema_version: u32,
+    pub(crate) scope: String,
+    pub(crate) seeds: Vec<String>,
+    pub(crate) mode: String,
+    pub(crate) minimum_confidence: Confidence,
+    pub(crate) candidates: Vec<AuditCandidate>,
+    pub(crate) abstained: bool,
+    pub(crate) history_coverage: HistoryCoverage,
+    pub(crate) hints: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ExplainOutput {
     pub(crate) schema_version: u32,
@@ -141,6 +186,36 @@ pub(crate) struct EvalReport {
     pub(crate) skipped_unknown_seed: usize,
     pub(crate) skipped_no_known_target: usize,
     pub(crate) metrics: Vec<EvalMetrics>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AuditEvalReport {
+    pub(crate) schema_version: u32,
+    pub(crate) repo_root: String,
+    pub(crate) query_shape: String,
+    pub(crate) train_commits: usize,
+    pub(crate) test_commits: usize,
+    pub(crate) top_k: usize,
+    pub(crate) max_files_per_commit: usize,
+    pub(crate) minimum_confidence: Confidence,
+    pub(crate) candidate_tasks: usize,
+    pub(crate) evaluated_tasks: usize,
+    pub(crate) skipped_unknown_targets: usize,
+    pub(crate) skipped_insufficient_known_files: usize,
+    pub(crate) metrics: Vec<AuditEvalMetrics>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct AuditEvalMetrics {
+    pub(crate) mode: String,
+    pub(crate) tasks: usize,
+    pub(crate) hits_at_k: usize,
+    pub(crate) hit_rate_at_k: f64,
+    pub(crate) precision_at_k: f64,
+    pub(crate) mrr: f64,
+    pub(crate) avg_results: f64,
+    pub(crate) avg_false_positives: f64,
+    pub(crate) abstention_rate: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

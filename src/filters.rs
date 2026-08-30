@@ -39,15 +39,25 @@ pub(crate) fn filter_related_results(
 }
 
 pub(crate) fn query_hints(results: &[ResultItem], exclude_patterns: &[String]) -> Vec<String> {
+    broad_change_hints(
+        &results
+            .iter()
+            .map(|result| result.path.as_str())
+            .collect::<Vec<_>>(),
+        exclude_patterns,
+    )
+}
+
+pub(crate) fn broad_change_hints(paths: &[&str], exclude_patterns: &[String]) -> Vec<String> {
     let mut hints = Vec::new();
-    let window = results.len().min(8);
+    let window = paths.len().min(8);
     if window == 0 {
         return hints;
     }
-    let broad_change_results = results
+    let broad_change_results = paths
         .iter()
         .take(window)
-        .filter(|item| looks_like_broad_change_path(&item.path))
+        .filter(|path| looks_like_broad_change_path(path))
         .count();
     if broad_change_results >= 4 && broad_change_results * 2 >= window {
         if exclude_patterns.is_empty() {
@@ -64,7 +74,7 @@ pub(crate) fn query_hints(results: &[ResultItem], exclude_patterns: &[String]) -
     hints
 }
 
-fn path_matches_any_pattern(path: &str, patterns: &[String]) -> bool {
+pub(crate) fn path_matches_any_pattern(path: &str, patterns: &[String]) -> bool {
     patterns
         .iter()
         .any(|pattern| path_matches_pattern(path, pattern))

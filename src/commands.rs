@@ -1,12 +1,16 @@
+use crate::audit::aggregate_audit_results;
 use crate::cli::{
     ParsedArgs, flag_bool, flag_optional_string, flag_positive_f64, flag_positive_usize,
     flag_string, flag_usize, parse_args, parse_modes,
 };
-use crate::evaluation::{evaluate_global, evaluate_on_demand};
+use crate::evaluation::{evaluate_audit_on_demand, evaluate_global, evaluate_on_demand};
 use crate::filters::{
-    filter_related_results, filtered_query_top, parse_exclude_patterns, query_hints,
+    broad_change_hints, filter_related_results, filtered_query_top, parse_exclude_patterns,
+    path_matches_any_pattern, query_hints,
 };
-use crate::git_utils::{git_diff_names, git_path_is_tracked};
+use crate::git_utils::{
+    git_diff_names, git_diff_names_for_range, git_path_is_tracked, git_worktree_names,
+};
 use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::history::{
     git_diff_tree_direct_for_target, git_log, git_log_direct_for_target,
@@ -17,7 +21,8 @@ use crate::history::{
 };
 use crate::model::*;
 use crate::output::{
-    OutputFormat, escape_text, parse_output_format, print_eval, print_json, print_query, short_hash,
+    OutputFormat, escape_text, parse_output_format, print_audit, print_audit_eval, print_eval,
+    print_json, print_query, short_hash,
 };
 use crate::pack::{
     git_log_for_target_pack_fast, git_log_for_target_pack_scan, git_pack_fast_direct_for_target,
@@ -26,8 +31,9 @@ use crate::pack::{
 use crate::path_utils::{normalize_input_path, pair_key};
 use crate::repo::RepoContext;
 use crate::{
-    AnyResult, DEFAULT_EVIDENCE, DEFAULT_HALF_LIFE_DAYS, DEFAULT_MAX_COMMITS, DEFAULT_MAX_FILES,
-    DEFAULT_ON_DEMAND_BACKEND, DEFAULT_TOP, JSON_SCHEMA_VERSION,
+    AUDIT_JSON_SCHEMA_VERSION, AnyResult, DEFAULT_AUDIT_TOP, DEFAULT_EVIDENCE,
+    DEFAULT_HALF_LIFE_DAYS, DEFAULT_MAX_COMMITS, DEFAULT_MAX_FILES, DEFAULT_ON_DEMAND_BACKEND,
+    DEFAULT_TOP, JSON_SCHEMA_VERSION,
 };
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::io::{self, Write};
@@ -47,6 +53,7 @@ pub(crate) fn run_with_writer<W: Write>(args: Vec<String>, out: &mut W) -> AnyRe
     match command {
         "query" => cmd_query(&args[1..], out),
         "explain" => cmd_explain(&args[1..], out),
+        "audit" => cmd_audit(&args[1..], out),
         "diff" => cmd_diff(&args[1..], out),
         "eval" => cmd_eval(&args[1..], out),
         "version" | "-V" | "--version" => {
@@ -68,6 +75,7 @@ fn print_usage<W: Write>(out: &mut W) -> AnyResult<()> {
         r#"related: content-blind related-file ranking from Git co-change history
 
 Usage:
+  related audit [--staged | --range REVISION_RANGE] [--top N] [--min-confidence LEVEL]
   related query <file> [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS]
   related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
   related explain <file-a> <file-b> [--max-commits N]
@@ -89,6 +97,7 @@ fn print_command_usage<W: Write>(command: Option<&str>, out: &mut W) -> AnyResul
         None => print_usage(out),
         Some("query") => print_query_usage(out),
         Some("explain") => print_explain_usage(out),
+        Some("audit") => print_audit_usage(out),
         Some("diff") => print_diff_usage(out),
         Some("eval") => print_eval_usage(out),
         Some(other) => Err(format!("unknown command {other:?}").into()),
@@ -106,6 +115,7 @@ Options:
   --top N                     Maximum results (default: {DEFAULT_TOP})
   --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits per result (default: 0)
+  --accuracy LEVEL            fast or exact (default: fast)
   --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
   --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
   --since DATE                Restrict history by Git date expression
@@ -128,6 +138,7 @@ Options:
   --repo PATH                 Repository or subdirectory (default: .)
   --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits to show (default: {DEFAULT_EVIDENCE})
+  --accuracy LEVEL            fast or exact (default: fast)
   --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
   --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
   --since DATE                Restrict history by Git date expression
@@ -136,6 +147,37 @@ Options:
   --jobs N                    Worker count for supported backends
   --scan-commits N            Pack-walk scan limit (0 = backend default)
   -h, --help                  Show this help"#
+    )?;
+    Ok(())
+}
+
+fn print_audit_usage<W: Write>(out: &mut W) -> AnyResult<()> {
+    writeln!(
+        out,
+        r#"Usage: related audit [options]
+
+Options:
+  --staged                    Audit staged changes
+  --range RANGE               Audit files changed in a Git revision range
+  --repo PATH                 Repository or subdirectory (default: .)
+  --mode MODE                 direct or pagerank (default: direct)
+  --top N                     Maximum candidates (default: {DEFAULT_AUDIT_TOP})
+  --min-confidence LEVEL      low, medium, or high (default: medium)
+  --format FORMAT             text or json (default: text)
+  --evidence N                Evidence commits per candidate (default: 0)
+  --accuracy LEVEL            fast or exact (default: fast)
+  --history-backend NAME      Advanced history reader override
+  --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
+  --since DATE                Restrict history by Git date expression
+  --max-files-per-commit N    Ignore broader commits (default: {DEFAULT_MAX_FILES})
+  --half-life-days N          Time-decay half-life (default: {DEFAULT_HALF_LIFE_DAYS})
+  --jobs N                    Worker count for supported backends
+  --scan-commits N            Pack-walk scan limit (0 = backend default)
+  --exclude PATTERNS          Comma-separated path patterns to hide
+  -h, --help                  Show this help
+
+The default worktree scope includes tracked modifications and untracked files.
+Low-confidence candidates are omitted unless --min-confidence low is used."#
     )?;
     Ok(())
 }
@@ -152,6 +194,7 @@ Options:
   --top N                     Maximum results (default: {DEFAULT_TOP})
   --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits per result (default: 0)
+  --accuracy LEVEL            fast or exact (default: fast)
   --history-backend NAME      History reader (default: {DEFAULT_ON_DEMAND_BACKEND})
   --max-commits N             Target commits to use (default: {DEFAULT_MAX_COMMITS}; 0 = unlimited)
   --since DATE                Restrict history by Git date expression
@@ -173,6 +216,8 @@ fn print_eval_usage<W: Write>(out: &mut W) -> AnyResult<()> {
 Options:
   --repo PATH                 Repository or subdirectory (default: .)
   --query-shape SHAPE         on-demand or global (default: on-demand)
+  --task TASK                 query or audit (default: query)
+  --min-confidence LEVEL      Audit threshold: low, medium, or high (default: medium)
   --test-commits N            Holdout commits (default: 200)
   --train-commits N           Training commits (default: 1000)
   --top N                     Evaluation cutoff (default: 10)
@@ -194,6 +239,7 @@ fn cmd_query<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "top",
             "format",
             "evidence",
+            "accuracy",
             "history-backend",
             "max-commits",
             "since",
@@ -329,13 +375,29 @@ fn parse_on_demand_config(
     parsed: &ParsedArgs,
     default_evidence: usize,
 ) -> AnyResult<OnDemandConfig> {
-    Ok(OnDemandConfig {
-        backend: parse_on_demand_backend(&flag_string(
+    let history_backend_explicit = parsed.flags.contains_key("history-backend");
+    let accuracy_explicit = parsed.flags.contains_key("accuracy");
+    if history_backend_explicit && accuracy_explicit {
+        return Err("--accuracy and --history-backend cannot be used together".into());
+    }
+    let backend = if let Some(accuracy) = flag_optional_string(parsed, "accuracy") {
+        match accuracy.as_str() {
+            "fast" => OnDemandBackend::PackFast,
+            "exact" => OnDemandBackend::GitCli,
+            other => return Err(format!("unknown accuracy {other:?}; use fast or exact").into()),
+        }
+    } else {
+        parse_on_demand_backend(&flag_string(
             parsed,
             "history-backend",
             DEFAULT_ON_DEMAND_BACKEND,
-        ))?,
-        backend_explicit: parsed.flags.contains_key("history-backend"),
+        ))?
+    };
+    Ok(OnDemandConfig {
+        backend,
+        // Public accuracy levels describe behavior, not a specific implementation.
+        // Keep the normal pack-fast -> Git fallback for `--accuracy fast`.
+        backend_explicit: history_backend_explicit,
         max_commits: flag_usize(parsed, "max-commits", DEFAULT_MAX_COMMITS)?,
         since: flag_optional_string(parsed, "since"),
         max_files_per_commit: flag_positive_usize(
@@ -441,6 +503,7 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "repo",
             "format",
             "evidence",
+            "accuracy",
             "history-backend",
             "max-commits",
             "since",
@@ -525,6 +588,153 @@ fn cmd_explain<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     Ok(())
 }
 
+fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
+    let parsed = parse_args(
+        args,
+        &[
+            "repo",
+            "range",
+            "mode",
+            "top",
+            "min-confidence",
+            "format",
+            "evidence",
+            "accuracy",
+            "history-backend",
+            "max-commits",
+            "since",
+            "max-files-per-commit",
+            "half-life-days",
+            "jobs",
+            "scan-commits",
+            "exclude",
+        ],
+        &["staged", "help", "h"],
+    )?;
+    if flag_bool(&parsed, "help") || flag_bool(&parsed, "h") {
+        return print_audit_usage(out);
+    }
+    if !parsed.positionals.is_empty() {
+        return Err("audit does not accept positional arguments".into());
+    }
+    if flag_bool(&parsed, "staged") && parsed.flags.contains_key("range") {
+        return Err("--staged and --range cannot be used together".into());
+    }
+
+    let repo_arg = flag_string(&parsed, "repo", ".");
+    let mode = flag_string(&parsed, "mode", "direct");
+    if !matches!(mode.as_str(), "direct" | "pagerank") {
+        return Err(format!("unknown audit mode {mode:?}; use direct or pagerank").into());
+    }
+    let top = flag_positive_usize(&parsed, "top", DEFAULT_AUDIT_TOP)?;
+    let minimum_confidence = parse_confidence(&flag_string(&parsed, "min-confidence", "medium"))?;
+    let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
+    let exclude_patterns = parse_exclude_patterns(&parsed);
+    let mut config = parse_on_demand_config(&parsed, 0)?;
+
+    let repo = RepoContext::discover(&repo_arg)?;
+    let root = repo.root_str()?;
+    let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
+    let (scope, seeds) = if flag_bool(&parsed, "staged") {
+        ("staged".to_string(), git_diff_names(root, true)?)
+    } else if let Some(range) = flag_optional_string(&parsed, "range") {
+        (
+            format!("range:{range}"),
+            git_diff_names_for_range(root, &range)?,
+        )
+    } else {
+        ("worktree".to_string(), git_worktree_names(root)?)
+    };
+    if seeds.is_empty() {
+        return Err(format!("no changed files found for {scope}").into());
+    }
+
+    let per_seed_top = top.saturating_mul(8).max(64);
+    let mut results_by_seed = Vec::with_capacity(seeds.len());
+    let mut runtime_backend_hint = None;
+    for seed in &seeds {
+        let (mut results, hint) = with_default_pack_fallback(&mut config, |config| {
+            query_on_demand(root, seed, &mode, per_seed_top, config)
+        })?;
+        if runtime_backend_hint.is_none() {
+            runtime_backend_hint = hint;
+        }
+        if !exclude_patterns.is_empty() {
+            results.retain(|result| !path_matches_any_pattern(&result.path, &exclude_patterns));
+        }
+        results_by_seed.push((seed.clone(), results));
+    }
+
+    let (candidates, filtered_low_confidence) = aggregate_audit_results(
+        &seeds,
+        results_by_seed,
+        minimum_confidence,
+        top,
+        config.evidence_limit,
+    );
+    let abstained = candidates.is_empty();
+    let mut hints = broad_change_hints(
+        &candidates
+            .iter()
+            .map(|candidate| candidate.path.as_str())
+            .collect::<Vec<_>>(),
+        &exclude_patterns,
+    );
+    if filtered_low_confidence > 0 {
+        hints.push(format!(
+            "Omitted {filtered_low_confidence} lower-confidence candidates; use --min-confidence low to inspect them."
+        ));
+    }
+    if let Some(hint) = runtime_backend_hint {
+        hints.insert(0, hint);
+    }
+    if let Some(hint) = backend_hint {
+        hints.insert(0, hint);
+    }
+    let output = AuditOutput {
+        schema_version: AUDIT_JSON_SCHEMA_VERSION,
+        scope,
+        seeds,
+        mode,
+        minimum_confidence,
+        candidates,
+        abstained,
+        history_coverage: history_coverage(&config),
+        hints,
+    };
+    match output_format {
+        OutputFormat::Text => print_audit(out, &output)?,
+        OutputFormat::Json => print_json(out, &output)?,
+    }
+    Ok(())
+}
+
+fn parse_confidence(value: &str) -> AnyResult<Confidence> {
+    match value {
+        "low" => Ok(Confidence::Low),
+        "medium" => Ok(Confidence::Medium),
+        "high" => Ok(Confidence::High),
+        other => Err(format!("unknown confidence {other:?}; use low, medium, or high").into()),
+    }
+}
+
+fn history_coverage(config: &OnDemandConfig) -> HistoryCoverage {
+    let (completeness, approximate) = match config.backend {
+        OnDemandBackend::GitCli | OnDemandBackend::GitRemoveEmpty => ("target-window-exact", false),
+        OnDemandBackend::PackScan if config.scan_commits == 0 => ("target-window-exact", false),
+        OnDemandBackend::PackFast => ("latency-bounded", true),
+        OnDemandBackend::PackScan => ("scan-bounded", true),
+        _ => ("backend-dependent", true),
+    };
+    HistoryCoverage {
+        backend: format!("{:?}", config.backend),
+        completeness: completeness.to_string(),
+        approximate,
+        max_target_commits: config.max_commits,
+        scan_commits: config.scan_commits,
+    }
+}
+
 pub(crate) fn explain_relationship(
     root: &str,
     input_base: &Path,
@@ -574,6 +784,7 @@ fn cmd_diff<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "top",
             "format",
             "evidence",
+            "accuracy",
             "history-backend",
             "max-commits",
             "since",
@@ -694,6 +905,8 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "half-life-days",
             "modes",
             "query-shape",
+            "task",
+            "min-confidence",
         ],
         &["help", "h"],
     )?;
@@ -711,7 +924,16 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
     let max_files = flag_positive_usize(&parsed, "max-files-per-commit", DEFAULT_MAX_FILES)?;
     let half_life = flag_positive_f64(&parsed, "half-life-days", DEFAULT_HALF_LIFE_DAYS)?;
-    let modes = parse_modes(&flag_string(&parsed, "modes", "direct,pagerank,path,hot"));
+    let task = flag_string(&parsed, "task", "query");
+    if !matches!(task.as_str(), "query" | "audit") {
+        return Err(format!("unknown eval task {task:?}; use query or audit").into());
+    }
+    let default_modes = if task == "audit" {
+        "direct,pagerank"
+    } else {
+        "direct,pagerank,path,hot"
+    };
+    let modes = parse_modes(&flag_string(&parsed, "modes", default_modes));
     let query_shape = flag_string(&parsed, "query-shape", "on-demand");
     for mode in &modes {
         validate_query_mode(mode)?;
@@ -734,6 +956,25 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         half_life_days: half_life,
         evidence_limit: 0,
     };
+    if task == "audit" {
+        if query_shape != "on-demand" {
+            return Err("audit evaluation supports only --query-shape on-demand".into());
+        }
+        let minimum_confidence =
+            parse_confidence(&flag_string(&parsed, "min-confidence", "medium"))?;
+        let mut report =
+            evaluate_audit_on_demand(train, test, &modes, top, graph_config, minimum_confidence)?;
+        report.repo_root = root.to_string();
+        report.train_commits = train.len();
+        report.test_commits = test.len();
+        report.top_k = top;
+        report.max_files_per_commit = max_files;
+        match output_format {
+            OutputFormat::Text => print_audit_eval(out, &report)?,
+            OutputFormat::Json => print_json(out, &report)?,
+        }
+        return Ok(());
+    }
     let mut report = match query_shape.as_str() {
         "on-demand" => evaluate_on_demand(train, test, &modes, top, graph_config)?,
         "global" => {
