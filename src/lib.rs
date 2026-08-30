@@ -13,6 +13,7 @@ mod path_utils;
 mod repo;
 
 use std::error::Error;
+use std::fmt;
 
 const DEFAULT_MAX_FILES: usize = 80;
 const DEFAULT_MAX_COMMITS: usize = 1000;
@@ -24,12 +25,39 @@ const DEFAULT_ON_DEMAND_BACKEND: &str = "pack-fast";
 const BROAD_CHANGE_EXCLUDE_SUGGESTION: &str = "*.lock,*-lock.*,*lockb,.github/workflows/*";
 const JSON_SCHEMA_VERSION: u32 = 1;
 const AUDIT_JSON_SCHEMA_VERSION: u32 = 2;
+pub const EXIT_AUDIT_FINDINGS: i32 = 3;
 
 type AnyError = Box<dyn Error>;
 type AnyResult<T> = Result<T, AnyError>;
 
 pub fn run(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     commands::run(args)
+}
+
+#[derive(Debug)]
+pub struct AuditFindingsError {
+    pub count: usize,
+    pub threshold: String,
+}
+
+impl fmt::Display for AuditFindingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "audit found {} candidate(s) at or above {} confidence",
+            self.count, self.threshold
+        )
+    }
+}
+
+impl Error for AuditFindingsError {}
+
+pub fn exit_code_for_error(error: &(dyn Error + 'static)) -> i32 {
+    if error.downcast_ref::<AuditFindingsError>().is_some() {
+        EXIT_AUDIT_FINDINGS
+    } else {
+        1
+    }
 }
 
 #[cfg(feature = "fuzzing")]

@@ -39,7 +39,9 @@ must change.
 `related audit` combines the historical relationships of the changed set,
 reports which changed files support each candidate, and omits weak one-off
 relationships by default. Its `low`, `medium`, and `high` confidence labels are
-evidence-strength heuristics, not calibrated probabilities.
+deterministic evidence-strength bands, not probabilities. The conservative
+`high` boundary requires at least 25 co-changes for one changed-file/candidate
+pair and was selected from chronological holdouts on three repositories.
 
 ## Skill installation
 
@@ -103,6 +105,7 @@ npx -y --package related-cli@latest related query src/auth.ts --top 20
 npx -y --package related-cli@latest related audit
 npx -y --package related-cli@latest related audit --staged
 npx -y --package related-cli@latest related audit --range main..HEAD
+npx -y --package related-cli@latest related audit --staged --fail-on-confidence high
 ```
 
 The commands are:
@@ -232,6 +235,23 @@ multi-file commit and tests whether the remaining changed set recovers it:
 related eval --task audit --test-commits 200 --train-commits 1000 --top 5
 ```
 
+Audit evaluation also reports candidate precision and task coverage for each
+confidence band. Run it on the target repository before enabling enforcement.
+
+### CI enforcement
+
+Audit is discovery-only by default and exits 0 even when it returns candidates.
+`--fail-on-confidence LEVEL` opts into enforcement: the audit output is still
+written, then the process exits 3 when any displayed candidate meets the chosen
+level. Operational and usage errors exit 1. A safe starting point is:
+
+```sh
+related audit --staged --accuracy exact --fail-on-confidence high
+```
+
+The failure threshold cannot be lower than `--min-confidence`. Enforcement is
+never enabled implicitly.
+
 ## Limitations
 
 - New files and repositories with little history have weak or no co-change
@@ -242,8 +262,9 @@ related eval --task audit --test-commits 200 --train-commits 1000 --top 5
   already crossed a committed rename boundary.
 - Deleted paths are not returned as related-file candidates.
 - Co-change is correlation, not a requirement to edit every returned file.
-- Audit confidence is currently heuristic and repository-independent; use the
-  built-in audit evaluation before enforcing it in CI.
+- Audit confidence is an evidence band rather than a probability. The measured
+  high boundary is conservative but not universally reliable; use the built-in
+  audit evaluation before enforcing it in CI.
 - End-to-end agent accuracy improvement is not yet established; the initial
   three-task paired pilot found one efficiency win, one regression, and one
   neutral functional result. One guarded rerun corrected the known regression,

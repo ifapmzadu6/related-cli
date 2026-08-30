@@ -1,6 +1,16 @@
-use crate::model::{AuditCandidate, Confidence, Evidence, ResultItem};
+use crate::model::{AuditCandidate, Confidence, ConfidenceThresholds, Evidence, ResultItem};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cmp::Ordering;
+
+const MEDIUM_CONFIDENCE_STRONGEST_PAIR: usize = 2;
+const HIGH_CONFIDENCE_STRONGEST_PAIR: usize = 25;
+
+pub(crate) fn confidence_thresholds() -> ConfidenceThresholds {
+    ConfidenceThresholds {
+        medium_min_strongest_pair_cochanges: MEDIUM_CONFIDENCE_STRONGEST_PAIR,
+        high_min_strongest_pair_cochanges: HIGH_CONFIDENCE_STRONGEST_PAIR,
+    }
+}
 
 #[derive(Debug)]
 struct PendingCandidate {
@@ -76,11 +86,7 @@ pub(crate) fn aggregate_audit_results(
                 .dedup_by(|left, right| left.hash == right.hash);
             candidate.evidence.truncate(evidence_limit);
             let support_count = candidate.supported_by.len();
-            let confidence = classify_confidence(
-                support_count,
-                candidate.cochanges,
-                candidate.strongest_pair_cochanges,
-            );
+            let confidence = classify_confidence(candidate.strongest_pair_cochanges);
             AuditCandidate {
                 path: candidate.path,
                 score: candidate.score,
@@ -105,16 +111,10 @@ pub(crate) fn aggregate_audit_results(
     (all_candidates, filtered)
 }
 
-fn classify_confidence(
-    support_count: usize,
-    cochanges: usize,
-    strongest_pair_cochanges: usize,
-) -> Confidence {
-    if strongest_pair_cochanges >= 5
-        || (support_count >= 2 && strongest_pair_cochanges >= 2 && cochanges >= 4)
-    {
+fn classify_confidence(strongest_pair_cochanges: usize) -> Confidence {
+    if strongest_pair_cochanges >= HIGH_CONFIDENCE_STRONGEST_PAIR {
         Confidence::High
-    } else if strongest_pair_cochanges >= 2 {
+    } else if strongest_pair_cochanges >= MEDIUM_CONFIDENCE_STRONGEST_PAIR {
         Confidence::Medium
     } else {
         Confidence::Low
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(filtered, 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, "test.rs");
-        assert_eq!(candidates[0].confidence, Confidence::High);
+        assert_eq!(candidates[0].confidence, Confidence::Medium);
         assert_eq!(candidates[0].support_count, 2);
         assert_eq!(candidates[0].supported_by, seeds);
         assert_eq!(candidates[0].cochanges, 5);
@@ -193,6 +193,19 @@ mod tests {
             0,
         );
         assert_eq!(candidates[0].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn a_relationship_repeated_twenty_five_times_is_high_confidence() {
+        let seeds = vec!["a.rs".to_string()];
+        let (candidates, _) = aggregate_audit_results(
+            &seeds,
+            vec![("a.rs".to_string(), vec![result("test.rs", 25, 0.9)])],
+            Confidence::High,
+            20,
+            0,
+        );
+        assert_eq!(candidates[0].confidence, Confidence::High);
     }
 
     #[test]

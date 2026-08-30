@@ -1,4 +1,4 @@
-use crate::audit::aggregate_audit_results;
+use crate::audit::{aggregate_audit_results, confidence_thresholds};
 use crate::cli::{
     ParsedArgs, flag_bool, flag_optional_string, flag_positive_f64, flag_positive_usize,
     flag_string, flag_usize, parse_args, parse_modes,
@@ -22,8 +22,8 @@ use crate::history::{
 };
 use crate::model::*;
 use crate::output::{
-    OutputFormat, escape_text, parse_output_format, print_audit, print_audit_eval, print_eval,
-    print_json, print_query, short_hash,
+    OutputFormat, confidence_name, escape_text, parse_output_format, print_audit, print_audit_eval,
+    print_eval, print_json, print_query, short_hash,
 };
 use crate::pack::{
     git_log_for_target_pack_fast, git_log_for_target_pack_scan, git_pack_fast_direct_for_target,
@@ -32,9 +32,9 @@ use crate::pack::{
 use crate::path_utils::{normalize_input_path, pair_key};
 use crate::repo::RepoContext;
 use crate::{
-    AUDIT_JSON_SCHEMA_VERSION, AnyResult, DEFAULT_AUDIT_TOP, DEFAULT_EVIDENCE,
+    AUDIT_JSON_SCHEMA_VERSION, AnyResult, AuditFindingsError, DEFAULT_AUDIT_TOP, DEFAULT_EVIDENCE,
     DEFAULT_HALF_LIFE_DAYS, DEFAULT_MAX_COMMITS, DEFAULT_MAX_FILES, DEFAULT_ON_DEMAND_BACKEND,
-    DEFAULT_TOP, JSON_SCHEMA_VERSION,
+    DEFAULT_TOP, EXIT_AUDIT_FINDINGS, JSON_SCHEMA_VERSION,
 };
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::io::{self, Write};
@@ -76,7 +76,7 @@ fn print_usage<W: Write>(out: &mut W) -> AnyResult<()> {
         r#"related: content-blind related-file ranking from Git co-change history
 
 Usage:
-  related audit [--staged | --range REVISION_RANGE] [--top N] [--min-confidence LEVEL]
+  related audit [--staged | --range REVISION_RANGE] [--top N] [--min-confidence LEVEL] [--fail-on-confidence LEVEL]
   related query <file> [--mode direct|pagerank|path|hot] [--top N] [--exclude PATTERNS]
   related query <file> [--history-backend hybrid|gix|git|git-remove-empty|git-batch|git-batch-parallel|git-diff-tree|git-diff-tree-parallel|git-rev-list|pack-fast|pack-scan] [--max-commits N] [--jobs N]
   related explain <file-a> <file-b> [--max-commits N]
@@ -164,6 +164,7 @@ Options:
   --mode MODE                 direct or pagerank (default: direct)
   --top N                     Maximum candidates (default: {DEFAULT_AUDIT_TOP})
   --min-confidence LEVEL      low, medium, or high (default: medium)
+  --fail-on-confidence LEVEL  Exit 3 when a displayed candidate meets LEVEL
   --format FORMAT             text or json (default: text)
   --evidence N                Evidence commits per candidate (default: 0)
   --accuracy LEVEL            fast or exact (default: fast)
@@ -178,7 +179,8 @@ Options:
   -h, --help                  Show this help
 
 The default worktree scope includes tracked modifications and untracked files.
-Low-confidence candidates are omitted unless --min-confidence low is used."#
+Low-confidence candidates are omitted unless --min-confidence low is used.
+Confidence uses the strongest changed-file pair: low <2, medium 2-24, high >=25."#
     )?;
     Ok(())
 }
@@ -609,6 +611,7 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             "mode",
             "top",
             "min-confidence",
+            "fail-on-confidence",
             "format",
             "evidence",
             "accuracy",
@@ -640,6 +643,12 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     }
     let top = flag_positive_usize(&parsed, "top", DEFAULT_AUDIT_TOP)?;
     let minimum_confidence = parse_confidence(&flag_string(&parsed, "min-confidence", "medium"))?;
+    let fail_on_confidence = flag_optional_string(&parsed, "fail-on-confidence")
+        .map(|value| parse_confidence(&value))
+        .transpose()?;
+    if fail_on_confidence.is_some_and(|threshold| threshold < minimum_confidence) {
+        return Err("--fail-on-confidence cannot be lower than --min-confidence".into());
+    }
     let output_format = parse_output_format(&flag_string(&parsed, "format", "text"))?;
     let exclude_patterns = parse_exclude_patterns(&parsed);
     let mut config = parse_on_demand_config(&parsed, 0)?;
@@ -715,6 +724,18 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         config.evidence_limit,
     );
     let abstained = candidates.is_empty();
+    let enforcement = fail_on_confidence.map(|threshold| {
+        let finding_count = candidates
+            .iter()
+            .filter(|candidate| candidate.confidence >= threshold)
+            .count();
+        AuditEnforcement {
+            threshold,
+            finding_count,
+            triggered: finding_count > 0,
+            exit_code: EXIT_AUDIT_FINDINGS,
+        }
+    });
     let mut hints = broad_change_hints(
         &candidates
             .iter()
@@ -739,14 +760,25 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         seeds,
         mode,
         minimum_confidence,
+        confidence_thresholds: confidence_thresholds(),
         candidates,
         abstained,
+        enforcement,
         history_coverage: history_coverage(&config, diff_rename_mapping),
         hints,
     };
     match output_format {
         OutputFormat::Text => print_audit(out, &output)?,
         OutputFormat::Json => print_json(out, &output)?,
+    }
+    if let Some(enforcement) = &output.enforcement
+        && enforcement.triggered
+    {
+        return Err(AuditFindingsError {
+            count: enforcement.finding_count,
+            threshold: confidence_name(enforcement.threshold).to_string(),
+        }
+        .into());
     }
     Ok(())
 }

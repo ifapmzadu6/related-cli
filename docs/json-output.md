@@ -58,6 +58,10 @@ command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
   "seeds": ["src/auth.ts", "src/session.ts"],
   "mode": "direct",
   "minimum_confidence": "medium",
+  "confidence_thresholds": {
+    "medium_min_strongest_pair_cochanges": 2,
+    "high_min_strongest_pair_cochanges": 25
+  },
   "candidates": [
     {
       "path": "tests/auth.test.ts",
@@ -65,8 +69,8 @@ command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
       "confidence": "high",
       "support_count": 2,
       "supported_by": ["src/auth.ts", "src/session.ts"],
-      "cochanges": 9,
-      "strongest_pair_cochanges": 6,
+      "cochanges": 29,
+      "strongest_pair_cochanges": 25,
       "weight": 2.1,
       "last_seen": "2026-08-01T12:00:00Z",
       "reason": "direct_cochange",
@@ -74,6 +78,12 @@ command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
     }
   ],
   "abstained": false,
+  "enforcement": {
+    "threshold": "high",
+    "finding_count": 1,
+    "triggered": true,
+    "exit_code": 3
+  },
   "history_coverage": {
     "backend": "PackFast",
     "completeness": "latency-bounded",
@@ -93,7 +103,19 @@ support across those paths, while `strongest_pair_cochanges` prevents one broad
 commit touching many seeds from looking like a repeatedly observed pair.
 
 `abstained` is true when no candidate met `minimum_confidence`. Confidence is a
-deterministic evidence-strength label, not a calibrated probability.
+deterministic evidence-strength label, not a probability. `low` means the
+strongest changed-file pair occurred at most once, `medium` means 2-24 times,
+and `high` means at least 25 times. The high boundary was selected from
+chronological holdouts on three repositories; repository-local evaluation is
+still recommended.
+
+`confidence_thresholds` makes those active boundaries machine-readable in both
+audit and audit-evaluation JSON.
+
+`enforcement` is present only with `--fail-on-confidence`. It describes the
+displayed findings used for the decision. Normal audit discovery exits 0 even
+when candidates exist. Triggered enforcement writes the complete output and
+then exits 3; usage, repository, and runtime errors exit 1.
 
 `rename_tracking` is `git-follow` for exact committed history,
 `git-follow+diff-renames` when exact audit also mapped an uncommitted rename,
@@ -116,4 +138,9 @@ already crossed a committed rename boundary.
 With `--task audit`, eval uses schema 2 and returns
 `query_shape: "on-demand-leave-one-out"`, the configured
 `minimum_confidence`, audit eligibility counters, and metrics including
-`hits_at_k`, `avg_false_positives`, and `abstention_rate`.
+`hits_at_k`, `avg_false_positives`, and `abstention_rate`. Its
+`confidence_metrics` array contains one row per mode and confidence band with
+candidate counts, correct candidates, candidate precision, tasks containing the
+band, task coverage, and the conditional hit rate. These rows are computed from
+the top-K candidate set before `minimum_confidence` filtering so one evaluation
+can compare all three bands.
