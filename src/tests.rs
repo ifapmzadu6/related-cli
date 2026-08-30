@@ -1,6 +1,9 @@
 use crate::BROAD_CHANGE_EXCLUDE_SUGGESTION;
 use crate::commands::{explain_relationship, merge_diff_result, run_with_writer};
-use crate::evaluation::{evaluate_audit_on_demand, evaluate_global, evaluate_on_demand};
+use crate::evaluation::{
+    evaluate_audit_on_demand, evaluate_global, evaluate_on_demand,
+    prepare_rename_aware_audit_history,
+};
 use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::history::{
     git_diff_tree_direct_from_hash_input, git_diff_tree_selected_commits, git_log,
@@ -328,6 +331,10 @@ fn cli_supports_json_format_for_all_commands() {
     ]);
     assert_eq!(audit_eval["schema_version"], 2);
     assert_eq!(audit_eval["query_shape"], "on-demand-leave-one-out");
+    assert_eq!(
+        audit_eval["rename_tracking"],
+        "training-window+current-test-diff"
+    );
     assert_eq!(audit_eval["metrics"][0]["hit_rate_at_k"], 1.0);
     assert_eq!(
         audit_eval["confidence_thresholds"]["medium_min_strongest_pair_cochanges"],
@@ -815,6 +822,158 @@ fn exact_history_follows_target_renames_for_query_and_audit() {
         serde_json::json!(["src/new.md"])
     );
     assert_eq!(audit["history_coverage"]["rename_tracking"], "git-follow");
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn audit_evaluation_maps_only_training_and_current_test_renames() {
+    fn record(hash: &str, files: &[&str], rename: Option<(&str, &str)>) -> RenameAwareCommit {
+        RenameAwareCommit {
+            commit: Commit {
+                hash: hash.to_string(),
+                unix_time: 1,
+                date: "2026-01-01T00:00:00Z".to_string(),
+                subject: hash.to_string(),
+                files: files.iter().map(|file| (*file).to_string()).collect(),
+            },
+            renames: rename
+                .map(|(old_path, new_path)| {
+                    vec![HistoryRename {
+                        old_path: old_path.to_string(),
+                        new_path: new_path.to_string(),
+                    }]
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    let records = vec![
+        record("test-after", &["new.md", "companion.md"], None),
+        record(
+            "test-rename",
+            &["new.md", "companion.md"],
+            Some(("old.md", "new.md")),
+        ),
+        record("train-two", &["old.md", "companion.md"], None),
+        record("train-one", &["old.md", "companion.md"], None),
+    ];
+    let history = prepare_rename_aware_audit_history(&records, 2).unwrap();
+    assert_eq!(history.training_renames, 0);
+    assert_eq!(history.test_diff_renames, 1);
+    assert_eq!(history.test[0].files, vec!["new.md", "companion.md"]);
+    assert_eq!(history.test[1].files, vec!["old.md", "companion.md"]);
+
+    let config = GraphBuildConfig {
+        max_files_per_commit: 10,
+        half_life_days: 365.0,
+        evidence_limit: 0,
+    };
+    let report = evaluate_audit_on_demand(
+        &history.train,
+        &history.test,
+        &["direct".to_string()],
+        5,
+        config,
+        Confidence::Medium,
+    )
+    .unwrap();
+    assert_eq!(report.evaluated_tasks, 2);
+    assert_eq!(report.skipped_unknown_targets, 1);
+    assert_eq!(report.metrics[0].hit_rate_at_k, 1.0);
+
+    let records = vec![
+        record("test", &["new.md", "companion.md"], None),
+        record("train-new", &["new.md", "companion.md"], None),
+        record(
+            "train-rename",
+            &["new.md", "companion.md"],
+            Some(("old.md", "new.md")),
+        ),
+        record("train-old", &["old.md", "companion.md"], None),
+    ];
+    let history = prepare_rename_aware_audit_history(&records, 1).unwrap();
+    assert_eq!(history.training_renames, 1);
+    assert_eq!(history.test_diff_renames, 0);
+    assert!(
+        history
+            .train
+            .iter()
+            .all(|commit| commit.files.contains(&"new.md".to_string()))
+    );
+}
+
+#[test]
+fn cli_audit_evaluation_parses_rename_boundaries() {
+    let repo = new_test_repo();
+    let old = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+    write_commit(
+        &repo,
+        "old pair one",
+        &[("old.md", old), ("companion.md", "one\n")],
+    );
+    write_commit(
+        &repo,
+        "old pair two",
+        &[
+            ("old.md", &format!("{old}eleven\n")),
+            ("companion.md", "two\n"),
+        ],
+    );
+    git(&repo, &["mv", "old.md", "new.md"]);
+    fs::write(repo.join("companion.md"), "three\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "rename with companion"]);
+
+    let evaluate = |test_commits: &str, train_commits: &str| {
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "eval".to_string(),
+                "--task".to_string(),
+                "audit".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--test-commits".to_string(),
+                test_commits.to_string(),
+                "--train-commits".to_string(),
+                train_commits.to_string(),
+                "--top".to_string(),
+                "5".to_string(),
+                "--modes".to_string(),
+                "direct".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+
+    let at_rename = evaluate("1", "2");
+    assert_eq!(
+        at_rename["rename_tracking"],
+        "training-window+current-test-diff"
+    );
+    assert_eq!(at_rename["training_renames"], 0);
+    assert_eq!(at_rename["test_diff_renames"], 1);
+    assert_eq!(at_rename["evaluated_tasks"], 2);
+    assert_eq!(at_rename["metrics"][0]["hit_rate_at_k"], 1.0);
+
+    write_commit(
+        &repo,
+        "new pair",
+        &[
+            ("new.md", &format!("{old}after\n")),
+            ("companion.md", "four\n"),
+        ],
+    );
+    let after_rename = evaluate("1", "3");
+    assert_eq!(after_rename["training_renames"], 1);
+    assert_eq!(after_rename["test_diff_renames"], 0);
+    assert_eq!(after_rename["evaluated_tasks"], 2);
+    assert_eq!(after_rename["metrics"][0]["hit_rate_at_k"], 1.0);
 
     fs::remove_dir_all(repo).ok();
 }

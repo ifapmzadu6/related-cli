@@ -33,6 +33,31 @@ pub(crate) fn git_log(
     parse_git_log(&out)
 }
 
+pub(crate) fn git_log_rename_aware(
+    repo: &str,
+    max_commits: usize,
+    since: Option<&str>,
+) -> AnyResult<Vec<RenameAwareCommit>> {
+    let mut args = vec![
+        "log".to_string(),
+        "--find-renames".to_string(),
+        "--name-status".to_string(),
+        "-z".to_string(),
+        "--diff-filter=ACMRT".to_string(),
+        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s".to_string(),
+    ];
+    if max_commits > 0 {
+        args.push(format!("--max-count={max_commits}"));
+    }
+    if let Some(since) = since {
+        args.push("--since".to_string());
+        args.push(since.to_string());
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_git(Path::new(repo), &arg_refs)?;
+    parse_git_log_rename_aware(&out)
+}
+
 pub(crate) fn git_log_for_target(
     repo: &str,
     target: &str,
@@ -1045,6 +1070,98 @@ fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
     Ok(commits)
 }
 
+fn parse_git_log_rename_aware(out: &[u8]) -> AnyResult<Vec<RenameAwareCommit>> {
+    let mut commits = Vec::new();
+    for raw_record in out.split(|byte| *byte == 0x1e) {
+        let raw_record = raw_record
+            .iter()
+            .position(|byte| !matches!(*byte, 0 | b'\n' | b'\r'))
+            .map_or(&[][..], |start| &raw_record[start..]);
+        if raw_record.is_empty() {
+            continue;
+        }
+        let header_end = raw_record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(raw_record.len());
+        let header = std::str::from_utf8(&raw_record[..header_end])?;
+        let mut fields = header.splitn(4, '\x1f');
+        let hash = fields.next().ok_or("missing commit hash")?.to_string();
+        let unix_time: i64 = fields
+            .next()
+            .ok_or("missing commit unix time")?
+            .parse()
+            .map_err(|err| format!("invalid commit unix time: {err}"))?;
+        let date = normalize_git_iso8601_date(fields.next().ok_or("missing commit date")?);
+        let subject = fields.next().unwrap_or_default().to_string();
+
+        let tokens: Vec<&[u8]> = raw_record
+            .get(header_end + 1..)
+            .unwrap_or_default()
+            .split(|byte| *byte == 0)
+            .filter(|token| !token.is_empty())
+            .collect();
+        let mut idx = 0usize;
+        let mut files = Vec::new();
+        let mut renames = Vec::new();
+        let mut seen = HashSet::default();
+        while idx < tokens.len() {
+            let status = tokens[idx];
+            idx += 1;
+            match status.first() {
+                Some(b'R') => {
+                    let old = tokens.get(idx).ok_or("truncated rename source")?;
+                    let new = tokens.get(idx + 1).ok_or("truncated rename destination")?;
+                    idx += 2;
+                    let old_path = decode_git_path(old)?;
+                    let new_path = decode_git_path(new)?;
+                    if !old_path.is_empty() && !new_path.is_empty() {
+                        if seen.insert(new_path.clone()) {
+                            files.push(new_path.clone());
+                        }
+                        renames.push(HistoryRename { old_path, new_path });
+                    }
+                }
+                Some(b'C') => {
+                    let _source = tokens.get(idx).ok_or("truncated copy source")?;
+                    let new = tokens.get(idx + 1).ok_or("truncated copy destination")?;
+                    idx += 2;
+                    let new = decode_git_path(new)?;
+                    if !new.is_empty() && seen.insert(new.clone()) {
+                        files.push(new);
+                    }
+                }
+                Some(b'A' | b'M' | b'T') => {
+                    let path = tokens.get(idx).ok_or("truncated changed path")?;
+                    idx += 1;
+                    let path = decode_git_path(path)?;
+                    if !path.is_empty() && seen.insert(path.clone()) {
+                        files.push(path);
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported rename-aware name-status token {:?}",
+                        String::from_utf8_lossy(status)
+                    )
+                    .into());
+                }
+            }
+        }
+        commits.push(RenameAwareCommit {
+            commit: Commit {
+                hash,
+                unix_time,
+                date,
+                subject,
+                files,
+            },
+            renames,
+        });
+    }
+    Ok(commits)
+}
+
 fn parse_git_log_direct(
     out: &[u8],
     target: &str,
@@ -1140,6 +1257,7 @@ fn parse_git_log_direct(
 #[cfg(feature = "fuzzing")]
 pub(crate) fn fuzz_parse_bytes(data: &[u8]) {
     let _ = parse_git_log(data);
+    let _ = parse_git_log_rename_aware(data);
     let _ = parse_git_log_record(data);
 }
 

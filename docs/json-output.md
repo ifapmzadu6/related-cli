@@ -144,3 +144,11 @@ candidate counts, correct candidates, candidate precision, tasks containing the
 band, task coverage, and the conditional hit rate. These rows are computed from
 the top-K candidate set before `minimum_confidence` filtering so one evaluation
 can compare all three bands.
+
+Audit evaluation also returns `rename_tracking`, `training_renames`, and
+`test_diff_renames`. `rename_tracking` is
+`training-window+current-test-diff`: rename chains entirely inside training are
+canonicalized to the training-boundary path, and a rename in the commit being
+evaluated maps its destination to the known source path. Renames learned from a
+different held-out test commit are deliberately unavailable, preventing future
+or cross-holdout leakage.

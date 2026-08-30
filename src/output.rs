@@ -235,6 +235,11 @@ pub(crate) fn print_audit_eval<W: Write>(out: &mut W, report: &AuditEvalReport) 
     )?;
     writeln!(
         out,
+        "rename_tracking={} training_renames={} test_diff_renames={}",
+        report.rename_tracking, report.training_renames, report.test_diff_renames,
+    )?;
+    writeln!(
+        out,
         "confidence strongest_pair_cochanges: low<{} medium={}..{} high>={}",
         report
             .confidence_thresholds

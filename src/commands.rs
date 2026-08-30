@@ -3,7 +3,10 @@ use crate::cli::{
     ParsedArgs, flag_bool, flag_optional_string, flag_positive_f64, flag_positive_usize,
     flag_string, flag_usize, parse_args, parse_modes,
 };
-use crate::evaluation::{evaluate_audit_on_demand, evaluate_global, evaluate_on_demand};
+use crate::evaluation::{
+    evaluate_audit_on_demand, evaluate_global, evaluate_on_demand,
+    prepare_rename_aware_audit_history,
+};
 use crate::filters::{
     broad_change_hints, filter_related_results, filtered_query_top, parse_exclude_patterns,
     path_matches_any_pattern, query_hints,
@@ -18,7 +21,8 @@ use crate::history::{
     git_log_direct_for_target, git_log_direct_for_target_remove_empty, git_log_for_target,
     git_log_for_target_batch, git_log_for_target_batch_parallel, git_log_for_target_diff_tree,
     git_log_for_target_diff_tree_parallel, git_log_for_target_remove_empty,
-    git_log_for_target_rev_list, gix_log_for_git_selected_target, gix_log_for_target,
+    git_log_for_target_rev_list, git_log_rename_aware, gix_log_for_git_selected_target,
+    gix_log_for_target,
 };
 use crate::model::*;
 use crate::output::{
@@ -1032,13 +1036,6 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let total = test_commits
         .checked_add(train_commits)
         .ok_or("test-commits and train-commits are too large")?;
-    let commits = git_log(root, total, None)?;
-    if commits.len() <= test_commits {
-        return Err(format!("not enough commits for evaluation: got {}", commits.len()).into());
-    }
-    let available_total = commits.len().min(total);
-    let test = &commits[..test_commits];
-    let train = &commits[test_commits..available_total];
     let graph_config = GraphBuildConfig {
         max_files_per_commit: max_files,
         half_life_days: half_life,
@@ -1050,19 +1047,39 @@ fn cmd_eval<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         }
         let minimum_confidence =
             parse_confidence(&flag_string(&parsed, "min-confidence", "medium"))?;
-        let mut report =
-            evaluate_audit_on_demand(train, test, &modes, top, graph_config, minimum_confidence)?;
+        let records = git_log_rename_aware(root, total, None)?;
+        let available_total = records.len().min(total);
+        let history =
+            prepare_rename_aware_audit_history(&records[..available_total], test_commits)?;
+        let mut report = evaluate_audit_on_demand(
+            &history.train,
+            &history.test,
+            &modes,
+            top,
+            graph_config,
+            minimum_confidence,
+        )?;
         report.repo_root = root.to_string();
-        report.train_commits = train.len();
-        report.test_commits = test.len();
+        report.train_commits = history.train.len();
+        report.test_commits = history.test.len();
         report.top_k = top;
         report.max_files_per_commit = max_files;
+        report.rename_tracking = "training-window+current-test-diff".to_string();
+        report.training_renames = history.training_renames;
+        report.test_diff_renames = history.test_diff_renames;
         match output_format {
             OutputFormat::Text => print_audit_eval(out, &report)?,
             OutputFormat::Json => print_json(out, &report)?,
         }
         return Ok(());
     }
+    let commits = git_log(root, total, None)?;
+    if commits.len() <= test_commits {
+        return Err(format!("not enough commits for evaluation: got {}", commits.len()).into());
+    }
+    let available_total = commits.len().min(total);
+    let test = &commits[..test_commits];
+    let train = &commits[test_commits..available_total];
     let mut report = match query_shape.as_str() {
         "on-demand" => evaluate_on_demand(train, test, &modes, top, graph_config)?,
         "global" => {
