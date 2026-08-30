@@ -259,6 +259,9 @@ related audit --staged --accuracy exact --fail-on-confidence high
 The failure threshold cannot be lower than `--min-confidence`. Enforcement is
 never enabled implicitly.
 
+See [CI and hook integration](docs/ci-integration.md) for a full-history GitHub
+Actions job and non-blocking or enforcing staged-change hooks.
+
 ## Limitations
 
 - New files and repositories with little history have weak or no co-change
