@@ -137,13 +137,23 @@ pub(crate) fn print_audit<W: Write>(out: &mut W, output: &AuditOutput) -> io::Re
             }
         }
     }
+    if let Some(enforcement) = &output.enforcement {
+        writeln!(
+            out,
+            "enforcement threshold={} findings={} triggered={} exit_code={}",
+            confidence_name(enforcement.threshold),
+            enforcement.finding_count,
+            enforcement.triggered,
+            enforcement.exit_code,
+        )?;
+    }
     for hint in &output.hints {
         writeln!(out, "hint: {hint}")?;
     }
     Ok(())
 }
 
-fn confidence_name(confidence: Confidence) -> &'static str {
+pub(crate) fn confidence_name(confidence: Confidence) -> &'static str {
     match confidence {
         Confidence::Low => "low",
         Confidence::Medium => "medium",
@@ -223,6 +233,23 @@ pub(crate) fn print_audit_eval<W: Write>(out: &mut W, report: &AuditEvalReport) 
         report.skipped_unknown_targets,
         report.skipped_insufficient_known_files
     )?;
+    writeln!(
+        out,
+        "confidence strongest_pair_cochanges: low<{} medium={}..{} high>={}",
+        report
+            .confidence_thresholds
+            .medium_min_strongest_pair_cochanges,
+        report
+            .confidence_thresholds
+            .medium_min_strongest_pair_cochanges,
+        report
+            .confidence_thresholds
+            .high_min_strongest_pair_cochanges
+            .saturating_sub(1),
+        report
+            .confidence_thresholds
+            .high_min_strongest_pair_cochanges,
+    )?;
     writeln!(out)?;
     writeln!(
         out,
@@ -241,6 +268,33 @@ pub(crate) fn print_audit_eval<W: Write>(out: &mut W, report: &AuditEvalReport) 
             metric.avg_results,
             metric.avg_false_positives,
             metric.abstention_rate,
+        )?;
+    }
+    writeln!(out)?;
+    writeln!(
+        out,
+        "{:<10} {:<10} {:>10} {:>10} {:>10} {:>12} {:>12} {:>12}",
+        "mode",
+        "confidence",
+        "candidates",
+        "correct",
+        "precision",
+        "task_coverage",
+        "task_hits",
+        "hit_given"
+    )?;
+    for metric in &report.confidence_metrics {
+        writeln!(
+            out,
+            "{:<10} {:<10} {:>10} {:>10} {:>10.4} {:>12.4} {:>12} {:>12.4}",
+            metric.mode,
+            confidence_name(metric.confidence),
+            metric.candidates,
+            metric.correct_candidates,
+            metric.candidate_precision,
+            metric.task_coverage,
+            metric.tasks_with_correct_candidate,
+            metric.conditional_hit_rate,
         )?;
     }
     Ok(())

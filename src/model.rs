@@ -114,9 +114,10 @@ pub(crate) struct QueryOutput {
     pub(crate) hints: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Confidence {
+    #[default]
     Low,
     Medium,
     High,
@@ -154,10 +155,27 @@ pub(crate) struct AuditOutput {
     pub(crate) seeds: Vec<String>,
     pub(crate) mode: String,
     pub(crate) minimum_confidence: Confidence,
+    pub(crate) confidence_thresholds: ConfidenceThresholds,
     pub(crate) candidates: Vec<AuditCandidate>,
     pub(crate) abstained: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) enforcement: Option<AuditEnforcement>,
     pub(crate) history_coverage: HistoryCoverage,
     pub(crate) hints: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+pub(crate) struct ConfidenceThresholds {
+    pub(crate) medium_min_strongest_pair_cochanges: usize,
+    pub(crate) high_min_strongest_pair_cochanges: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AuditEnforcement {
+    pub(crate) threshold: Confidence,
+    pub(crate) finding_count: usize,
+    pub(crate) triggered: bool,
+    pub(crate) exit_code: i32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -199,11 +217,26 @@ pub(crate) struct AuditEvalReport {
     pub(crate) top_k: usize,
     pub(crate) max_files_per_commit: usize,
     pub(crate) minimum_confidence: Confidence,
+    pub(crate) confidence_thresholds: ConfidenceThresholds,
     pub(crate) candidate_tasks: usize,
     pub(crate) evaluated_tasks: usize,
     pub(crate) skipped_unknown_targets: usize,
     pub(crate) skipped_insufficient_known_files: usize,
     pub(crate) metrics: Vec<AuditEvalMetrics>,
+    pub(crate) confidence_metrics: Vec<AuditConfidenceMetrics>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct AuditConfidenceMetrics {
+    pub(crate) mode: String,
+    pub(crate) confidence: Confidence,
+    pub(crate) candidates: usize,
+    pub(crate) correct_candidates: usize,
+    pub(crate) candidate_precision: f64,
+    pub(crate) tasks_with_candidates: usize,
+    pub(crate) tasks_with_correct_candidate: usize,
+    pub(crate) task_coverage: f64,
+    pub(crate) conditional_hit_rate: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

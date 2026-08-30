@@ -283,6 +283,10 @@ fn cli_supports_json_format_for_all_commands() {
     assert_eq!(audit["candidates"][0]["path"], "b.md");
     assert_eq!(audit["candidates"][0]["confidence"], "medium");
     assert_eq!(
+        audit["confidence_thresholds"]["high_min_strongest_pair_cochanges"],
+        25
+    );
+    assert_eq!(
         audit["candidates"][0]["supported_by"],
         serde_json::json!(["a.md"])
     );
@@ -325,6 +329,14 @@ fn cli_supports_json_format_for_all_commands() {
     assert_eq!(audit_eval["schema_version"], 2);
     assert_eq!(audit_eval["query_shape"], "on-demand-leave-one-out");
     assert_eq!(audit_eval["metrics"][0]["hit_rate_at_k"], 1.0);
+    assert_eq!(
+        audit_eval["confidence_thresholds"]["medium_min_strongest_pair_cochanges"],
+        2
+    );
+    assert_eq!(
+        audit_eval["confidence_metrics"].as_array().unwrap().len(),
+        3
+    );
 
     let invalid = run_with_writer(
         vec![
@@ -394,6 +406,64 @@ fn audit_includes_untracked_seeds_and_abstains_from_weak_candidates() {
             .unwrap()
             .contains("lower-confidence")
     );
+
+    let mut enforced_output = Vec::new();
+    let finding = run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+            "--fail-on-confidence".to_string(),
+            "medium".to_string(),
+        ],
+        &mut enforced_output,
+    )
+    .unwrap_err();
+    assert_eq!(crate::exit_code_for_error(finding.as_ref()), 3);
+    let enforced: serde_json::Value = serde_json::from_slice(&enforced_output).unwrap();
+    assert_eq!(enforced["enforcement"]["threshold"], "medium");
+    assert_eq!(enforced["enforcement"]["finding_count"], 1);
+    assert_eq!(enforced["enforcement"]["triggered"], true);
+    assert_eq!(enforced["enforcement"]["exit_code"], 3);
+
+    let mut no_finding_output = Vec::new();
+    run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+            "--fail-on-confidence".to_string(),
+            "high".to_string(),
+        ],
+        &mut no_finding_output,
+    )
+    .unwrap();
+    let no_finding: serde_json::Value = serde_json::from_slice(&no_finding_output).unwrap();
+    assert_eq!(no_finding["enforcement"]["triggered"], false);
+
+    let invalid_threshold = run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--min-confidence".to_string(),
+            "high".to_string(),
+            "--fail-on-confidence".to_string(),
+            "medium".to_string(),
+        ],
+        &mut Vec::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(invalid_threshold.contains("cannot be lower"));
 
     fs::remove_dir_all(repo).ok();
 }

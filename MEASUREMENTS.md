@@ -72,13 +72,38 @@ Interpretation:
 - Direct co-change had better MRR than path ordering in all three runs and
   better hit@5 in two. The small `related-cli` history favored path hit rate,
   so this is not a universal direct-ranking win.
-- The initial medium-confidence heuristic still averaged 3.60-4.28 false
-  positives and abstained rarely. It is suitable as an explicit,
-  deterministic first contract but is not calibrated enough for CI failure
-  semantics.
+- The medium discovery threshold still averaged 3.60-4.28 false positives and
+  abstained rarely. It remains useful for a shortlist, but is intentionally not
+  the default CI failure threshold.
 - These tasks predict files from historical commits. They do not establish that
   every recovered historical file was semantically required, or that an agent
   will make a better edit after seeing it.
+
+### Confidence calibration and enforcement
+
+Added on 2026-08-30 JST. The evaluator now reports candidate precision and task
+coverage separately for low, medium, and high evidence bands. Threshold sweeps
+used the same direct-mode chronological holdouts above. An absolute high
+boundary of 20 strongest-pair co-changes produced many false candidates in
+`vscode-edge-devtools`; 30 removed every high candidate from
+`too_tired_to_type`. A boundary of 25 retained signal in both larger histories
+and was selected as the conservative cross-repository compromise:
+
+| repository | evaluated tasks | high candidates | correct high candidates | candidate precision | task coverage | hit given high |
+|---|---:|---:|---:|---:|---:|---:|
+| `related-cli` | 66 | 0 | 0 | n/a | 0.0000 | n/a |
+| `too_tired_to_type` | 162 | 13 | 8 | 0.6154 | 0.0802 | 0.6154 |
+| `vscode-edge-devtools` | 145 | 48 | 44 | 0.9167 | 0.3310 | 0.9167 |
+| combined | 373 | 61 | 52 | 0.8525 | 0.1635 | 0.8525 |
+
+The small repository correctly produced no high findings because its 30-commit
+training window cannot establish a 25-occurrence pair. This is deliberate
+abstention, not evidence that the repository has no omissions. The 61-candidate
+sample is also too small to interpret `high` as a universal probability.
+
+`related audit --fail-on-confidence high` therefore remains explicit and
+disabled by default. Normal discovery exits 0, an opted-in finding exits 3 after
+writing the complete audit result, and operational or usage errors exit 1.
 
 Warm-ish CLI latency was remeasured on this repository with the rename-aware
 release build, the twenty-file `HEAD~1..HEAD` changed set, and 20 sequential
