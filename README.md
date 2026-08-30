@@ -168,8 +168,10 @@ before an exact full-history walk.
   memory use on unusually broad histories.
 - An explicitly requested incompatible backend returns an error.
 
-The Git backend is path-exact and follows detected file renames. Pack backends
-currently use the present path only. No backend creates a persistent index.
+The Git backend is path-exact and follows similarity-detected file renames.
+Pack backends follow a committed rename when exactly one deleted source has the
+same blob as the new path; ambiguous copies and content-changing renames are
+left for exact mode. No backend creates a persistent index.
 
 For normal use, prefer the stable accuracy levels instead of selecting an
 implementation backend directly:
@@ -179,12 +181,13 @@ related audit --accuracy fast
 related audit --accuracy exact
 ```
 
-`fast` uses the latency-bounded default and can fall back to Git. Audit maps an
-uncommitted staged rename to its old history path, but fast queries do not yet
-follow older committed rename chains. `exact` uses Git's exact target-history
-selection and follows detected committed renames, combining old and new target
-paths into one relationship chain. `--history-backend` remains available for
-advanced measurement and compatibility.
+`fast` uses the latency-bounded default and can fall back to Git. It maps an
+uncommitted staged rename to its old history path and follows unambiguous,
+content-identical committed renames directly from pack data. `exact` uses Git's
+exact target-history selection and also follows similarity-detected renames
+whose contents changed, combining old and new target paths into one relationship
+chain. `--history-backend` remains available for advanced measurement and
+compatibility.
 
 ### Ranking controls
 
@@ -261,9 +264,9 @@ never enabled implicitly.
 - New files and repositories with little history have weak or no co-change
   evidence.
 - Squashed histories and broad mechanical commits reduce signal quality.
-- Fast pack history maps a staged rename to its old path but does not yet follow
-  older committed rename chains; use `--accuracy exact` when a current path has
-  already crossed a committed rename boundary.
+- Fast pack history follows only unambiguous, content-identical committed
+  renames. Use `--accuracy exact` for content-changing or ambiguous rename
+  boundaries.
 - Deleted paths are not returned as related-file candidates.
 - Co-change is correlation, not a requirement to edit every returned file.
 - Audit confidence is an evidence band rather than a probability. The measured
