@@ -1,5 +1,5 @@
 use crate::AnyResult;
-use crate::model::{EvalReport, QueryOutput};
+use crate::model::{AuditEvalReport, AuditOutput, Confidence, EvalReport, QueryOutput};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::io::{self, Write};
@@ -76,6 +76,80 @@ pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Re
     Ok(())
 }
 
+pub(crate) fn print_audit<W: Write>(out: &mut W, output: &AuditOutput) -> io::Result<()> {
+    writeln!(
+        out,
+        "audit scope={} mode={} seeds={} minimum_confidence={} backend={} completeness={}",
+        escape_text(&output.scope),
+        escape_text(&output.mode),
+        output.seeds.len(),
+        confidence_name(output.minimum_confidence),
+        escape_text(&output.history_coverage.backend),
+        escape_text(&output.history_coverage.completeness),
+    )?;
+    writeln!(
+        out,
+        "changed {}",
+        output
+            .seeds
+            .iter()
+            .map(|seed| escape_text(seed))
+            .collect::<Vec<_>>()
+            .join(",")
+    )?;
+    if output.abstained {
+        writeln!(out, "no candidates met the confidence threshold")?;
+    } else {
+        for (idx, candidate) in output.candidates.iter().enumerate() {
+            writeln!(
+                out,
+                "{} {} confidence={} support={}/{} co={} strongest_co={} s={:.3}",
+                idx + 1,
+                escape_text(&candidate.path),
+                confidence_name(candidate.confidence),
+                candidate.support_count,
+                output.seeds.len(),
+                candidate.cochanges,
+                candidate.strongest_pair_cochanges,
+                candidate.score,
+            )?;
+            writeln!(
+                out,
+                "  supported_by {}",
+                candidate
+                    .supported_by
+                    .iter()
+                    .map(|seed| escape_text(seed))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )?;
+            for ev in &candidate.evidence {
+                writeln!(
+                    out,
+                    "  - {} {} files={} weight={:.6} {}",
+                    short_hash(&ev.hash),
+                    ev.date,
+                    ev.file_count,
+                    ev.weight,
+                    escape_text(&ev.subject)
+                )?;
+            }
+        }
+    }
+    for hint in &output.hints {
+        writeln!(out, "hint: {hint}")?;
+    }
+    Ok(())
+}
+
+fn confidence_name(confidence: Confidence) -> &'static str {
+    match confidence {
+        Confidence::Low => "low",
+        Confidence::Medium => "medium",
+        Confidence::High => "high",
+    }
+}
+
 fn compact_reason(reason: &str) -> Option<&str> {
     match reason {
         "direct_cochange" => None,
@@ -123,6 +197,49 @@ pub(crate) fn print_eval<W: Write>(out: &mut W, report: &EvalReport) -> io::Resu
             metric.recall_at_k,
             metric.mrr,
             metric.avg_results
+        )?;
+    }
+    Ok(())
+}
+
+pub(crate) fn print_audit_eval<W: Write>(out: &mut W, report: &AuditEvalReport) -> io::Result<()> {
+    writeln!(out, "repo: {}", escape_text(&report.repo_root))?;
+    writeln!(
+        out,
+        "task=audit query_shape={} train_commits={} test_commits={} top_k={} max_files_per_commit={} minimum_confidence={}",
+        report.query_shape,
+        report.train_commits,
+        report.test_commits,
+        report.top_k,
+        report.max_files_per_commit,
+        confidence_name(report.minimum_confidence),
+    )?;
+    writeln!(
+        out,
+        "candidate_tasks={} evaluated_tasks={} skipped_unknown_targets={} skipped_insufficient_known_files={}",
+        report.candidate_tasks,
+        report.evaluated_tasks,
+        report.skipped_unknown_targets,
+        report.skipped_insufficient_known_files
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "{:<10} {:>8} {:>10} {:>12} {:>10} {:>11} {:>10} {:>12}",
+        "mode", "tasks", "hit@k", "precision@k", "mrr", "avg_results", "avg_false", "abstention"
+    )?;
+    for metric in &report.metrics {
+        writeln!(
+            out,
+            "{:<10} {:>8} {:>10.4} {:>12.4} {:>10.4} {:>11.2} {:>10.2} {:>12.4}",
+            metric.mode,
+            metric.tasks,
+            metric.hit_rate_at_k,
+            metric.precision_at_k,
+            metric.mrr,
+            metric.avg_results,
+            metric.avg_false_positives,
+            metric.abstention_rate,
         )?;
     }
     Ok(())

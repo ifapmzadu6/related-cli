@@ -32,6 +32,79 @@ Baselines:
 - `hot`: globally frequently changed files. This checks whether `related` is
   merely returning popular files.
 
+## Changed-set omission audit holdout
+
+Added on 2026-08-30 JST. `related eval --task audit` uses a chronological
+leave-one-out task: for every eligible held-out multi-file commit, one
+history-known file is hidden and the remaining known files become the changed
+set. The evaluator checks whether `related audit` recovers the omitted file.
+Training commits are strictly older than test commits.
+
+Default-confidence runs used `--top 5 --min-confidence medium`:
+
+| repository | test/train | eligible tasks | mode | hit@5 | MRR | avg results | avg false positives | abstention |
+|---|---:|---:|---|---:|---:|---:|---:|---:|
+| `related-cli` | 10/30 | 60 | direct | 0.5500 | 0.4808 | 4.60 | 4.05 | 0.0000 |
+| `related-cli` | 10/30 | 60 | pagerank | 0.5833 | 0.4875 | 4.60 | 4.02 | 0.0000 |
+| `too_tired_to_type` | 50/200 | 162 | direct | 0.7654 | 0.6905 | 4.36 | 3.60 | 0.0679 |
+| `too_tired_to_type` | 50/200 | 162 | pagerank | 0.7531 | 0.6733 | 4.36 | 3.61 | 0.0679 |
+| `vscode-edge-devtools` | 50/200 | 145 | direct | 0.6897 | 0.5625 | 4.97 | 4.28 | 0.0000 |
+| `vscode-edge-devtools` | 50/200 | 145 | pagerank | 0.6897 | 0.5275 | 4.97 | 4.28 | 0.0000 |
+
+The eligibility accounting excluded 41, 57, and 9 unknown omitted targets,
+respectively. It also excluded zero, one, and two known targets whose commits
+did not leave enough known seed files.
+
+An unfiltered `--min-confidence low` comparison used the same target-local
+candidate graph and compared direct co-change ordering with the path/name
+baseline:
+
+| repository | direct hit@5 / MRR | path hit@5 / MRR |
+|---|---:|---:|
+| `related-cli` | 0.5833 / 0.5267 | 0.7500 / 0.3958 |
+| `too_tired_to_type` | 0.8272 / 0.7331 | 0.8210 / 0.6350 |
+| `vscode-edge-devtools` | 0.6897 / 0.5625 | 0.4966 / 0.3597 |
+
+Interpretation:
+
+- Changed-set evaluation is now aligned with the proposed pre-PR use case; the
+  older single-seed query evaluation did not measure this workflow.
+- Direct co-change had better MRR than path ordering in all three runs and
+  better hit@5 in two. The small `related-cli` history favored path hit rate,
+  so this is not a universal direct-ranking win.
+- The initial medium-confidence heuristic still averaged 3.60-4.28 false
+  positives and abstained rarely. It is suitable as an explicit,
+  deterministic first contract but is not calibrated enough for CI failure
+  semantics.
+- These tasks predict files from historical commits. They do not establish that
+  every recovered historical file was semantically required, or that an agent
+  will make a better edit after seeing it.
+
+Warm-ish CLI latency was measured on this repository with the release binary,
+the five-file `HEAD~1..HEAD` changed set, and 20 sequential runs per accuracy
+level:
+
+| accuracy | median | p95 | max |
+|---|---:|---:|---:|
+| `fast` | 60.26 ms | 85.04 ms | 664.66 ms |
+| `exact` | 215.25 ms | 304.22 ms | 349.64 ms |
+
+Both p95 results met the provisional 500 ms local audit budget. The fast maximum
+shows that isolated cold or noisy runs can still exceed it; this is not a
+cross-machine service-level guarantee.
+
+Reproduction examples:
+
+```sh
+related eval --task audit --repo ../too_tired_to_type \
+  --test-commits 50 --train-commits 200 --top 5 \
+  --modes direct,pagerank --min-confidence medium
+
+related eval --task audit --repo ../vscode-edge-devtools \
+  --test-commits 50 --train-commits 200 --top 5 \
+  --modes direct,path --min-confidence low
+```
+
 ## Token Efficiency
 
 The token-efficiency question is different from the ranking-accuracy question.

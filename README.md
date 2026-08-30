@@ -12,9 +12,10 @@
 
 </div>
 
-`related` ranks files related to a target file using only Git co-change
-history. It is intended as a small, supplementary context-expansion step before
-an agent or developer edits, reviews, or explains a tracked file.
+`related` audits a changed file set and ranks likely omissions using only Git
+co-change history. It can also query files individually as a small,
+supplementary context-expansion step before an agent or developer edits,
+reviews, or explains a tracked file.
 
 It does not parse source code, imports, symbols, embeddings, or file contents.
 The same signal therefore works for code, tests, docs, configs, migrations,
@@ -34,6 +35,11 @@ graph:
 Queries can use direct co-change ranking or Personalized PageRank over the
 target-local co-change graph. Rankings are context hints, not proof that a file
 must change.
+
+`related audit` combines the historical relationships of the changed set,
+reports which changed files support each candidate, and omits weak one-off
+relationships by default. Its `low`, `medium`, and `high` confidence labels are
+evidence-strength heuristics, not calibrated probabilities.
 
 ## Skill installation
 
@@ -94,18 +100,20 @@ directly through the npm package:
 
 ```sh
 npx -y --package related-cli@latest related query src/auth.ts --top 20
-npx -y --package related-cli@latest related diff --top 20
-npx -y --package related-cli@latest related diff --staged --top 20
+npx -y --package related-cli@latest related audit
+npx -y --package related-cli@latest related audit --staged
+npx -y --package related-cli@latest related audit --range main..HEAD
 ```
 
 The commands are:
 
 | Command | Purpose |
 |---|---|
+| `related audit [--staged\|--range RANGE]` | Audit a changed set for likely omitted companion files |
 | `related query <file>` | Rank files related to one tracked file |
 | `related explain <file-a> <file-b>` | Show direct co-change evidence for a pair |
-| `related diff [--staged]` | Aggregate related files for the current changed set |
-| `related eval` | Run a chronological holdout evaluation |
+| `related diff [--staged]` | Legacy changed-set aggregation without confidence filtering |
+| `related eval [--task query\|audit]` | Run a chronological holdout evaluation |
 
 Run `related <command> --help` for the complete option list.
 
@@ -160,6 +168,18 @@ before an exact full-history walk.
 The Git backend is path-exact but does not follow file renames. No backend
 creates a persistent index.
 
+For normal use, prefer the stable accuracy levels instead of selecting an
+implementation backend directly:
+
+```sh
+related audit --accuracy fast
+related audit --accuracy exact
+```
+
+`fast` uses the latency-bounded default and can fall back to Git. `exact` uses
+Git's exact target-history selection. `--history-backend` remains available for
+advanced measurement and compatibility.
+
 ### Ranking controls
 
 Common controls include:
@@ -184,11 +204,10 @@ related query src/auth.ts \
 ```
 
 The default compact text output contains ranked paths and short `co=` counts.
-Use `--format json` with `query`, `diff`, `explain`, or `eval` when another tool
-needs structured output. Every JSON object includes `"schema_version": 1`; see
-[the JSON output contract](docs/json-output.md). Evidence is opt-in for `query`
-and `diff`. Follow any emitted `hint:` lines before opening a large number of
-files.
+Use `--format json` when another tool needs structured output. Query-oriented
+commands retain schema 1; `audit` and audit evaluation use schema 2. See
+[the JSON output contract](docs/json-output.md). Evidence is opt-in. Follow any
+emitted `hint:` lines before opening a large number of files.
 
 ### Evaluation
 
@@ -203,6 +222,13 @@ related eval --test-commits 200 --train-commits 1000 --top 10
 useful for measuring the potential of the history signal but should not be
 presented as production-query accuracy.
 
+Audit evaluation chronologically hides one known file from each eligible
+multi-file commit and tests whether the remaining changed set recovers it:
+
+```sh
+related eval --task audit --test-commits 200 --train-commits 1000 --top 5
+```
+
 ## Limitations
 
 - New files and repositories with little history have weak or no co-change
@@ -211,6 +237,8 @@ presented as production-query accuracy.
 - File renames are not followed by the exact Git backend.
 - Deleted paths are not returned as related-file candidates.
 - Co-change is correlation, not a requirement to edit every returned file.
+- Audit confidence is currently heuristic and repository-independent; use the
+  built-in audit evaluation before enforcing it in CI.
 - End-to-end agent accuracy improvement is not yet established; the initial
   three-task paired pilot found one efficiency win, one regression, and one
   neutral functional result. One guarded rerun corrected the known regression,

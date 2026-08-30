@@ -21,10 +21,12 @@ mkdir -p "$project"
 (cd "$project" && npm exec --yes --package "$tarball" related-install-skill >/dev/null)
 test -f "$project/.agents/skills/find-related-files/SKILL.md"
 grep -qF "related-cli@$version related query" "$project/.agents/skills/find-related-files/SKILL.md"
+grep -qF "related-cli@$version related audit" "$project/.agents/skills/find-related-files/SKILL.md"
 grep -qF "related-cli@latest related-install-skill" "$project/.agents/skills/find-related-files/SKILL.md"
 
 (cd "$project" && npm exec --yes --package "$tarball" related-install-skill claude >/dev/null)
 test -f "$project/.claude/skills/find-related-files/SKILL.md"
 grep -qF "related-cli@$version related query" "$project/.claude/skills/find-related-files/SKILL.md"
+grep -qF "related-cli@$version related audit" "$project/.claude/skills/find-related-files/SKILL.md"
 
 echo "npm package ok"

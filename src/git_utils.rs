@@ -139,6 +139,40 @@ pub(crate) fn git_diff_names(repo: &str, staged: bool) -> AnyResult<Vec<String>>
     Ok(paths)
 }
 
+pub(crate) fn git_worktree_names(repo: &str) -> AnyResult<Vec<String>> {
+    let mut paths = git_diff_names(repo, false)?;
+    let out = run_git(
+        repo,
+        &["ls-files", "--others", "--exclude-standard", "-z", "--"],
+    )?;
+    for raw_path in out.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        let path = decode_git_path(raw_path)?;
+        if !path.is_empty() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+pub(crate) fn git_diff_names_for_range(repo: &str, range: &str) -> AnyResult<Vec<String>> {
+    if range.is_empty() || range.starts_with('-') || range.chars().any(char::is_whitespace) {
+        return Err("--range must be a non-empty Git revision range without whitespace".into());
+    }
+    let out = run_git(repo, &["diff", "--name-only", "-z", range, "--"])?;
+    let mut paths = Vec::new();
+    for raw_path in out.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+        let path = decode_git_path(raw_path)?;
+        if !path.is_empty() {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

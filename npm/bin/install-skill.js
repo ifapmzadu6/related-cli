@@ -58,7 +58,7 @@ function pinRuntimeVersion(skillDir, packageVersion) {
   const skillPath = path.join(skillDir, "SKILL.md");
   const source = fs.readFileSync(skillPath, "utf8");
   const pinned = source.replace(
-    /related-cli@latest(?= related (?:query|diff)\b)/g,
+    /related-cli@latest(?= related (?:audit|query|diff)\b)/g,
     `related-cli@${packageVersion}`,
   );
   if (pinned === source) {

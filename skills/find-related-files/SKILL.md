@@ -27,15 +27,17 @@ Before committing or opening a PR, aggregate the current changed set once. Use
 the first form for unstaged edits and the second for staged edits:
 
 ```sh
-env npm_config_loglevel=error npx -y --package related-cli@latest related diff --top 20
-env npm_config_loglevel=error npx -y --package related-cli@latest related diff --staged --top 20
+env npm_config_loglevel=error npx -y --package related-cli@latest related audit
+env npm_config_loglevel=error npx -y --package related-cli@latest related audit --staged
 ```
 
 Do not query every changed file separately. Compare the candidates with the task
 and current diff, then directly inspect likely omissions such as documentation,
 tests, configuration, generated metadata, migrations, and cross-platform
-counterparts. A ranking alone is not a reason to edit a file. If both staged and
-unstaged changes exist, audit each set once.
+counterparts. The output shows which changed files support each candidate and
+omits low-confidence one-off relationships by default. Confidence is an
+evidence-strength heuristic, not a probability or a reason to edit a file. If
+both staged and unstaged changes exist, audit each set once.
 
 ## Query discipline
 

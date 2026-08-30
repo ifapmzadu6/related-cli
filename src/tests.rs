@@ -1,6 +1,6 @@
 use crate::BROAD_CHANGE_EXCLUDE_SUGGESTION;
 use crate::commands::{explain_relationship, merge_diff_result, run_with_writer};
-use crate::evaluation::{evaluate_global, evaluate_on_demand};
+use crate::evaluation::{evaluate_audit_on_demand, evaluate_global, evaluate_on_demand};
 use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::history::{
     git_diff_tree_direct_from_hash_input, git_diff_tree_selected_commits, git_log,
@@ -267,6 +267,28 @@ fn cli_supports_json_format_for_all_commands() {
     assert_eq!(diff["target"], "a.md");
     assert_eq!(diff["related"][0]["path"], "b.md");
 
+    let audit = run_json(vec![
+        "audit".to_string(),
+        "--staged".to_string(),
+        "--repo".to_string(),
+        repo.display().to_string(),
+        "--accuracy".to_string(),
+        "exact".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ]);
+    assert_eq!(audit["schema_version"], 2);
+    assert_eq!(audit["scope"], "staged");
+    assert_eq!(audit["seeds"], serde_json::json!(["a.md"]));
+    assert_eq!(audit["candidates"][0]["path"], "b.md");
+    assert_eq!(audit["candidates"][0]["confidence"], "medium");
+    assert_eq!(
+        audit["candidates"][0]["supported_by"],
+        serde_json::json!(["a.md"])
+    );
+    assert_eq!(audit["history_coverage"]["backend"], "GitCli");
+    assert_eq!(audit["history_coverage"]["approximate"], false);
+
     let eval = run_json(vec![
         "eval".to_string(),
         "--repo".to_string(),
@@ -283,6 +305,25 @@ fn cli_supports_json_format_for_all_commands() {
     assert_eq!(eval["schema_version"], 1);
     assert_eq!(eval["query_shape"], "on-demand");
     assert_eq!(eval["metrics"][0]["mode"], "direct");
+
+    let audit_eval = run_json(vec![
+        "eval".to_string(),
+        "--task".to_string(),
+        "audit".to_string(),
+        "--repo".to_string(),
+        repo.display().to_string(),
+        "--test-commits".to_string(),
+        "1".to_string(),
+        "--train-commits".to_string(),
+        "2".to_string(),
+        "--modes".to_string(),
+        "direct".to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ]);
+    assert_eq!(audit_eval["schema_version"], 2);
+    assert_eq!(audit_eval["query_shape"], "on-demand-leave-one-out");
+    assert_eq!(audit_eval["metrics"][0]["hit_rate_at_k"], 1.0);
 
     let invalid = run_with_writer(
         vec![
@@ -302,13 +343,104 @@ fn cli_supports_json_format_for_all_commands() {
 
 #[test]
 fn cli_subcommands_provide_help_without_repository_access() {
-    for command in ["query", "explain", "diff", "eval"] {
+    for command in ["query", "explain", "audit", "diff", "eval"] {
         let mut output = Vec::new();
         run_with_writer(vec![command.to_string(), "--help".to_string()], &mut output).unwrap();
         let text = String::from_utf8(output).unwrap();
         assert!(text.starts_with(&format!("Usage: related {command}")));
         assert!(text.contains("-h, --help"));
     }
+}
+
+#[test]
+fn audit_includes_untracked_seeds_and_abstains_from_weak_candidates() {
+    let repo = new_test_repo();
+    write_commit(&repo, "pair one", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
+    write_commit(&repo, "pair two", &[("a.md", "a2\n"), ("b.md", "b2\n")]);
+    write_commit(&repo, "one-off", &[("a.md", "a3\n"), ("weak.md", "w1\n")]);
+    fs::write(repo.join("a.md"), "worktree\n").unwrap();
+    fs::write(repo.join("new.md"), "untracked\n").unwrap();
+
+    let mut output = Vec::new();
+    run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ],
+        &mut output,
+    )
+    .unwrap();
+    let audit: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(audit["scope"], "worktree");
+    assert_eq!(audit["seeds"], serde_json::json!(["a.md", "new.md"]));
+    assert_eq!(audit["candidates"][0]["path"], "b.md");
+    assert!(
+        audit["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| candidate["path"] != "weak.md")
+    );
+    assert_eq!(audit["abstained"], false);
+    assert!(
+        audit["hints"][0]
+            .as_str()
+            .unwrap()
+            .contains("lower-confidence")
+    );
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn audit_supports_revision_ranges_and_public_accuracy_levels() {
+    let repo = new_test_repo();
+    write_commit(&repo, "pair one", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
+    write_commit(&repo, "pair two", &[("a.md", "a2\n"), ("b.md", "b2\n")]);
+    write_commit(&repo, "only a", &[("a.md", "a3\n")]);
+
+    let mut output = Vec::new();
+    run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--range".to_string(),
+            "HEAD~1..HEAD".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+        ],
+        &mut output,
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.starts_with("audit scope=range:HEAD~1..HEAD"));
+    assert!(text.contains("1 b.md confidence=medium"));
+    assert!(text.contains("supported_by a.md"));
+
+    let conflict = run_with_writer(
+        vec![
+            "query".to_string(),
+            "a.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+            "--history-backend".to_string(),
+            "git".to_string(),
+        ],
+        &mut Vec::new(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(conflict.contains("cannot be used together"));
+
+    fs::remove_dir_all(repo).ok();
 }
 
 #[test]
@@ -692,11 +824,16 @@ fn on_demand_eval_matches_the_shipping_graph_shape() {
     let graph = RelatedGraph::new(&data);
     let global = evaluate_global(&graph, &test, &modes, 2, 10).unwrap();
     let on_demand = evaluate_on_demand(&train, &test, &modes, 2, config).unwrap();
+    let audit =
+        evaluate_audit_on_demand(&train, &test, &modes, 2, config, Confidence::Medium).unwrap();
 
     assert_eq!(global.query_shape, "global");
     assert_eq!(on_demand.query_shape, "on-demand");
+    assert_eq!(audit.query_shape, "on-demand-leave-one-out");
+    assert_eq!(audit.evaluated_tasks, 2);
     assert_eq!(global.metrics[0].hit_rate_at_k, 1.0);
     assert_eq!(on_demand.metrics[0].hit_rate_at_k, 0.0);
+    assert_eq!(audit.metrics[0].hit_rate_at_k, 0.0);
 }
 
 #[test]

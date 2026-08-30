@@ -1,3 +1,4 @@
+mod audit;
 mod cli;
 mod commands;
 mod evaluation;
@@ -18,9 +19,11 @@ const DEFAULT_MAX_COMMITS: usize = 1000;
 const DEFAULT_HALF_LIFE_DAYS: f64 = 365.0;
 const DEFAULT_EVIDENCE: usize = 8;
 const DEFAULT_TOP: usize = 20;
+const DEFAULT_AUDIT_TOP: usize = 5;
 const DEFAULT_ON_DEMAND_BACKEND: &str = "pack-fast";
 const BROAD_CHANGE_EXCLUDE_SUGGESTION: &str = "*.lock,*-lock.*,*lockb,.github/workflows/*";
 const JSON_SCHEMA_VERSION: u32 = 1;
+const AUDIT_JSON_SCHEMA_VERSION: u32 = 2;
 
 type AnyError = Box<dyn Error>;
 type AnyResult<T> = Result<T, AnyError>;
