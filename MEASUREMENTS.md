@@ -80,18 +80,35 @@ Interpretation:
   every recovered historical file was semantically required, or that an agent
   will make a better edit after seeing it.
 
-Warm-ish CLI latency was measured on this repository with the release binary,
-the five-file `HEAD~1..HEAD` changed set, and 20 sequential runs per accuracy
-level:
+Warm-ish CLI latency was remeasured on this repository with the rename-aware
+release build, the twenty-file `HEAD~1..HEAD` changed set, and 20 sequential
+runs per accuracy level:
 
 | accuracy | median | p95 | max |
 |---|---:|---:|---:|
-| `fast` | 60.26 ms | 85.04 ms | 664.66 ms |
-| `exact` | 215.25 ms | 304.22 ms | 349.64 ms |
+| `fast` | 74.26 ms | 77.68 ms | 558.52 ms |
+| `exact` | 153.85 ms | 162.14 ms | 163.09 ms |
 
 Both p95 results met the provisional 500 ms local audit budget. The fast maximum
 shows that isolated cold or noisy runs can still exceed it; this is not a
 cross-machine service-level guarantee.
+
+### Rename-aware target history
+
+Added on 2026-08-30 JST. Exact queries now select target commits with Git
+`--follow --find-renames`, expand the selected commits in batches, and
+canonicalize the old and new target names into one relationship chain. Exact
+audits select target histories in parallel and expand the union of commit hashes
+once, which kept the twenty-seed p95 above within the provisional 500 ms budget.
+
+A repository fixture covered two co-change commits before a rename, the rename
+commit itself, and one commit after it. Query and audit both returned the
+companion with four co-changes and did not return the old target path as a
+candidate. A second fixture staged an uncommitted rename after two historical
+co-changes; both fast and exact audit attributed the companion to the visible
+new path with two co-changes. Fast audit reports `diff-renames-only` for that
+case because its older committed pack history remains current-path-only; exact
+reports `git-follow+diff-renames`.
 
 Reproduction examples:
 
@@ -768,11 +785,12 @@ after `hybrid` was faster than the hybrid first run on all six targets. Once
 both paths were warmed, the winner was mixed, so cache effects alone do not make
 `hybrid` the better default.
 
-The `direct` query path was then optimized to avoid building the full co-change
+Before rename following was introduced, the `direct` query path was optimized
+to avoid building the full co-change
 pair graph. For direct ranking, only target-to-neighbor pairs are needed, so the
 implementation computes those pairs directly from history output. This removes
 the O(n^2) all-file pair construction from the agent-facing query path. The
-`git` direct path streams compact `git log --no-renames --full-diff`
+then-current `git` direct path streamed compact `git log --no-renames --full-diff`
 output directly into scores without first materializing a `Vec<Commit>`. The
 `git-diff-tree` and `git-rev-list` direct paths pass raw commit-hash output straight into
 `git diff-tree --stdin`, avoiding Rust-side ObjectId parse/stringify work, and
@@ -794,7 +812,8 @@ parser also stops processing a commit as soon as the changed-file count exceeds
 A faster approximate selector was also added as `--history-backend git-rev-list`.
 It selects target commits with `git rev-list HEAD -- <target>` and expands them
 with the same `git diff-tree --stdin` path. This is not exactly equivalent to
-the exact `git log --no-renames --full-diff --diff-filter=ACMRT -- <target>` backend:
+the pre-rename exact
+`git log --no-renames --full-diff --diff-filter=ACMRT -- <target>` backend:
 co-change counts can differ, but the top companion paths stayed stable in the
 probes below.
 

@@ -142,6 +142,7 @@ pub(crate) struct HistoryCoverage {
     pub(crate) backend: String,
     pub(crate) completeness: String,
     pub(crate) approximate: bool,
+    pub(crate) rename_tracking: String,
     pub(crate) max_target_commits: usize,
     pub(crate) scan_commits: usize,
 }

@@ -9,13 +9,14 @@ use crate::filters::{
     path_matches_any_pattern, query_hints,
 };
 use crate::git_utils::{
-    git_diff_names, git_diff_names_for_range, git_path_is_tracked, git_worktree_names,
+    git_diff_audit_paths, git_diff_audit_paths_for_range, git_diff_names, git_path_is_tracked,
+    git_worktree_audit_paths,
 };
 use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::history::{
-    git_diff_tree_direct_for_target, git_log, git_log_direct_for_target,
-    git_log_direct_for_target_remove_empty, git_log_for_target, git_log_for_target_batch,
-    git_log_for_target_batch_parallel, git_log_for_target_diff_tree,
+    git_diff_tree_direct_for_target, git_followed_commits_for_targets, git_log,
+    git_log_direct_for_target, git_log_direct_for_target_remove_empty, git_log_for_target,
+    git_log_for_target_batch, git_log_for_target_batch_parallel, git_log_for_target_diff_tree,
     git_log_for_target_diff_tree_parallel, git_log_for_target_remove_empty,
     git_log_for_target_rev_list, gix_log_for_git_selected_target, gix_log_for_target,
 };
@@ -325,10 +326,21 @@ fn query_on_demand(
         return Ok(results);
     }
     let commits = on_demand_commits(root, target, config)?;
+    query_from_commits(root, target, &commits, mode, top, config)
+}
+
+fn query_from_commits(
+    root: &str,
+    target: &str,
+    commits: &[Commit],
+    mode: &str,
+    top: usize,
+    config: &OnDemandConfig,
+) -> AnyResult<Vec<ResultItem>> {
     if mode == "direct" {
         return Ok(query_direct_from_commits(
             target,
-            &commits,
+            commits,
             config,
             top,
             config.evidence_limit as isize,
@@ -336,7 +348,7 @@ fn query_on_demand(
     }
     let data = build_graph_data(
         root,
-        &commits,
+        commits,
         GraphBuildConfig {
             max_files_per_commit: config.max_files_per_commit,
             half_life_days: config.half_life_days,
@@ -635,34 +647,64 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     let repo = RepoContext::discover(&repo_arg)?;
     let root = repo.root_str()?;
     let backend_hint = configure_backend_for_repo(&repo, &mut config)?;
-    let (scope, seeds) = if flag_bool(&parsed, "staged") {
-        ("staged".to_string(), git_diff_names(root, true)?)
+    let (scope, audit_paths) = if flag_bool(&parsed, "staged") {
+        ("staged".to_string(), git_diff_audit_paths(root, true)?)
     } else if let Some(range) = flag_optional_string(&parsed, "range") {
         (
             format!("range:{range}"),
-            git_diff_names_for_range(root, &range)?,
+            git_diff_audit_paths_for_range(root, &range)?,
         )
     } else {
-        ("worktree".to_string(), git_worktree_names(root)?)
+        ("worktree".to_string(), git_worktree_audit_paths(root)?)
     };
-    if seeds.is_empty() {
+    if audit_paths.is_empty() {
         return Err(format!("no changed files found for {scope}").into());
     }
+    let seeds: Vec<String> = audit_paths.iter().map(|path| path.path.clone()).collect();
+    let history_targets: Vec<String> = audit_paths
+        .iter()
+        .map(|path| path.history_path.clone())
+        .collect();
+    let changed_paths: HashSet<String> = audit_paths
+        .iter()
+        .flat_map(|path| [path.path.clone(), path.history_path.clone()])
+        .collect();
+    let diff_rename_mapping = audit_paths
+        .iter()
+        .any(|path| path.path != path.history_path);
 
     let per_seed_top = top.saturating_mul(8).max(64);
     let mut results_by_seed = Vec::with_capacity(seeds.len());
     let mut runtime_backend_hint = None;
-    for seed in &seeds {
-        let (mut results, hint) = with_default_pack_fallback(&mut config, |config| {
-            query_on_demand(root, seed, &mode, per_seed_top, config)
-        })?;
-        if runtime_backend_hint.is_none() {
-            runtime_backend_hint = hint;
+    if config.backend == OnDemandBackend::GitCli {
+        for (idx, (history_seed, commits)) in
+            git_followed_commits_for_targets(root, &history_targets, &config)?
+                .into_iter()
+                .enumerate()
+        {
+            let seed = &seeds[idx];
+            let mut results =
+                query_from_commits(root, &history_seed, &commits, &mode, per_seed_top, &config)?;
+            results.retain(|result| {
+                !changed_paths.contains(&result.path)
+                    && !path_matches_any_pattern(&result.path, &exclude_patterns)
+            });
+            results_by_seed.push((seed.clone(), results));
         }
-        if !exclude_patterns.is_empty() {
-            results.retain(|result| !path_matches_any_pattern(&result.path, &exclude_patterns));
+    } else {
+        for (seed, history_seed) in seeds.iter().zip(&history_targets) {
+            let (mut results, hint) = with_default_pack_fallback(&mut config, |config| {
+                query_on_demand(root, history_seed, &mode, per_seed_top, config)
+            })?;
+            if runtime_backend_hint.is_none() {
+                runtime_backend_hint = hint;
+            }
+            results.retain(|result| {
+                !changed_paths.contains(&result.path)
+                    && !path_matches_any_pattern(&result.path, &exclude_patterns)
+            });
+            results_by_seed.push((seed.clone(), results));
         }
-        results_by_seed.push((seed.clone(), results));
     }
 
     let (candidates, filtered_low_confidence) = aggregate_audit_results(
@@ -699,7 +741,7 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
         minimum_confidence,
         candidates,
         abstained,
-        history_coverage: history_coverage(&config),
+        history_coverage: history_coverage(&config, diff_rename_mapping),
         hints,
     };
     match output_format {
@@ -718,7 +760,7 @@ fn parse_confidence(value: &str) -> AnyResult<Confidence> {
     }
 }
 
-fn history_coverage(config: &OnDemandConfig) -> HistoryCoverage {
+fn history_coverage(config: &OnDemandConfig, diff_rename_mapping: bool) -> HistoryCoverage {
     let (completeness, approximate) = match config.backend {
         OnDemandBackend::GitCli | OnDemandBackend::GitRemoveEmpty => ("target-window-exact", false),
         OnDemandBackend::PackScan if config.scan_commits == 0 => ("target-window-exact", false),
@@ -730,6 +772,20 @@ fn history_coverage(config: &OnDemandConfig) -> HistoryCoverage {
         backend: format!("{:?}", config.backend),
         completeness: completeness.to_string(),
         approximate,
+        rename_tracking: if matches!(
+            config.backend,
+            OnDemandBackend::GitCli | OnDemandBackend::GitRemoveEmpty
+        ) {
+            if diff_rename_mapping {
+                "git-follow+diff-renames".to_string()
+            } else {
+                "git-follow".to_string()
+            }
+        } else if diff_rename_mapping {
+            "diff-renames-only".to_string()
+        } else {
+            "current-path-only".to_string()
+        },
         max_target_commits: config.max_commits,
         scan_commits: config.scan_commits,
     }

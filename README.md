@@ -165,8 +165,8 @@ before an exact full-history walk.
   memory use on unusually broad histories.
 - An explicitly requested incompatible backend returns an error.
 
-The Git backend is path-exact but does not follow file renames. No backend
-creates a persistent index.
+The Git backend is path-exact and follows detected file renames. Pack backends
+currently use the present path only. No backend creates a persistent index.
 
 For normal use, prefer the stable accuracy levels instead of selecting an
 implementation backend directly:
@@ -176,8 +176,11 @@ related audit --accuracy fast
 related audit --accuracy exact
 ```
 
-`fast` uses the latency-bounded default and can fall back to Git. `exact` uses
-Git's exact target-history selection. `--history-backend` remains available for
+`fast` uses the latency-bounded default and can fall back to Git. Audit maps an
+uncommitted staged rename to its old history path, but fast queries do not yet
+follow older committed rename chains. `exact` uses Git's exact target-history
+selection and follows detected committed renames, combining old and new target
+paths into one relationship chain. `--history-backend` remains available for
 advanced measurement and compatibility.
 
 ### Ranking controls
@@ -234,7 +237,9 @@ related eval --task audit --test-commits 200 --train-commits 1000 --top 5
 - New files and repositories with little history have weak or no co-change
   evidence.
 - Squashed histories and broad mechanical commits reduce signal quality.
-- File renames are not followed by the exact Git backend.
+- Fast pack history maps a staged rename to its old path but does not yet follow
+  older committed rename chains; use `--accuracy exact` when a current path has
+  already crossed a committed rename boundary.
 - Deleted paths are not returned as related-file candidates.
 - Co-change is correlation, not a requirement to edit every returned file.
 - Audit confidence is currently heuristic and repository-independent; use the

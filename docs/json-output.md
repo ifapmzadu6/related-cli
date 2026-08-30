@@ -78,6 +78,7 @@ command. Evidence entries contain `hash`, `date`, `subject`, `file_count`, and
     "backend": "PackFast",
     "completeness": "latency-bounded",
     "approximate": true,
+    "rename_tracking": "current-path-only",
     "max_target_commits": 1000,
     "scan_commits": 0
   },
@@ -93,6 +94,12 @@ commit touching many seeds from looking like a repeatedly observed pair.
 
 `abstained` is true when no candidate met `minimum_confidence`. Confidence is a
 deterministic evidence-strength label, not a calibrated probability.
+
+`rename_tracking` is `git-follow` for exact committed history,
+`git-follow+diff-renames` when exact audit also mapped an uncommitted rename,
+`diff-renames-only` when fast audit mapped only the current diff, and
+`current-path-only` otherwise. Use exact accuracy when the current path has
+already crossed a committed rename boundary.
 
 ## Explain
 

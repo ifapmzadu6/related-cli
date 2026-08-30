@@ -79,13 +79,14 @@ pub(crate) fn print_query<W: Write>(out: &mut W, output: &QueryOutput) -> io::Re
 pub(crate) fn print_audit<W: Write>(out: &mut W, output: &AuditOutput) -> io::Result<()> {
     writeln!(
         out,
-        "audit scope={} mode={} seeds={} minimum_confidence={} backend={} completeness={}",
+        "audit scope={} mode={} seeds={} minimum_confidence={} backend={} completeness={} rename_tracking={}",
         escape_text(&output.scope),
         escape_text(&output.mode),
         output.seeds.len(),
         confidence_name(output.minimum_confidence),
         escape_text(&output.history_coverage.backend),
         escape_text(&output.history_coverage.completeness),
+        escape_text(&output.history_coverage.rename_tracking),
     )?;
     writeln!(
         out,

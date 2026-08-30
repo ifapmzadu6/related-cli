@@ -123,24 +123,36 @@ pub(crate) fn git_path_is_tracked(repo: &str, path: &str) -> AnyResult<bool> {
 }
 
 pub(crate) fn git_diff_names(repo: &str, staged: bool) -> AnyResult<Vec<String>> {
-    let args = if staged {
-        vec!["diff", "--name-only", "-z", "--cached"]
-    } else {
-        vec!["diff", "--name-only", "-z"]
-    };
-    let out = run_git(repo, &args)?;
-    let mut paths = Vec::new();
-    for raw_path in out.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-        let path = decode_git_path(raw_path)?;
-        if !path.is_empty() {
-            paths.push(path);
-        }
-    }
-    Ok(paths)
+    Ok(git_diff_audit_paths(repo, staged)?
+        .into_iter()
+        .map(|path| path.path)
+        .collect())
 }
 
-pub(crate) fn git_worktree_names(repo: &str) -> AnyResult<Vec<String>> {
-    let mut paths = git_diff_names(repo, false)?;
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AuditPath {
+    pub(crate) path: String,
+    pub(crate) history_path: String,
+}
+
+pub(crate) fn git_diff_audit_paths(repo: &str, staged: bool) -> AnyResult<Vec<AuditPath>> {
+    let args: Vec<&str> = if staged {
+        vec![
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--cached",
+            "--",
+        ]
+    } else {
+        vec!["diff", "--name-status", "-z", "--find-renames", "--"]
+    };
+    parse_audit_paths(&run_git(repo, &args)?, true)
+}
+
+pub(crate) fn git_worktree_audit_paths(repo: &str) -> AnyResult<Vec<AuditPath>> {
+    let mut paths = git_diff_audit_paths(repo, false)?;
     let out = run_git(
         repo,
         &["ls-files", "--others", "--exclude-standard", "-z", "--"],
@@ -148,28 +160,86 @@ pub(crate) fn git_worktree_names(repo: &str) -> AnyResult<Vec<String>> {
     for raw_path in out.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
         let path = decode_git_path(raw_path)?;
         if !path.is_empty() {
-            paths.push(path);
+            paths.push(AuditPath {
+                history_path: path.clone(),
+                path,
+            });
         }
     }
-    paths.sort();
-    paths.dedup();
+    paths.sort_by(|left, right| left.path.cmp(&right.path));
+    paths.dedup_by(|left, right| left.path == right.path);
     Ok(paths)
 }
 
-pub(crate) fn git_diff_names_for_range(repo: &str, range: &str) -> AnyResult<Vec<String>> {
+pub(crate) fn git_diff_audit_paths_for_range(repo: &str, range: &str) -> AnyResult<Vec<AuditPath>> {
     if range.is_empty() || range.starts_with('-') || range.chars().any(char::is_whitespace) {
         return Err("--range must be a non-empty Git revision range without whitespace".into());
     }
-    let out = run_git(repo, &["diff", "--name-only", "-z", range, "--"])?;
+    let out = run_git(
+        repo,
+        &["diff", "--name-status", "-z", "--find-renames", range, "--"],
+    )?;
+    parse_audit_paths(&out, false)
+}
+
+fn parse_audit_paths(out: &[u8], use_rename_source: bool) -> AnyResult<Vec<AuditPath>> {
+    let tokens: Vec<&[u8]> = out
+        .split(|byte| *byte == 0)
+        .filter(|token| !token.is_empty())
+        .collect();
     let mut paths = Vec::new();
-    for raw_path in out.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-        let path = decode_git_path(raw_path)?;
-        if !path.is_empty() {
-            paths.push(path);
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+        let status = tokens[idx];
+        idx += 1;
+        match status.first() {
+            Some(b'R') => {
+                let old = tokens.get(idx).ok_or("truncated rename source")?;
+                let new = tokens.get(idx + 1).ok_or("truncated rename destination")?;
+                idx += 2;
+                let old = decode_git_path(old)?;
+                let new = decode_git_path(new)?;
+                if !new.is_empty() {
+                    paths.push(AuditPath {
+                        history_path: if use_rename_source { old } else { new.clone() },
+                        path: new,
+                    });
+                }
+            }
+            Some(b'C') => {
+                let _source = tokens.get(idx).ok_or("truncated copy source")?;
+                let new = tokens.get(idx + 1).ok_or("truncated copy destination")?;
+                idx += 2;
+                let new = decode_git_path(new)?;
+                if !new.is_empty() {
+                    paths.push(AuditPath {
+                        history_path: new.clone(),
+                        path: new,
+                    });
+                }
+            }
+            Some(b'A' | b'D' | b'M' | b'T' | b'U') => {
+                let raw_path = tokens.get(idx).ok_or("truncated changed path")?;
+                idx += 1;
+                let path = decode_git_path(raw_path)?;
+                if !path.is_empty() {
+                    paths.push(AuditPath {
+                        history_path: path.clone(),
+                        path,
+                    });
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported git diff name-status token {:?}",
+                    String::from_utf8_lossy(status)
+                )
+                .into());
+            }
         }
     }
-    paths.sort();
-    paths.dedup();
+    paths.sort_by(|left, right| left.path.cmp(&right.path));
+    paths.dedup_by(|left, right| left.path == right.path);
     Ok(paths)
 }
 
