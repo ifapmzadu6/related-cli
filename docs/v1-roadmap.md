@@ -21,8 +21,12 @@ history coverage.
 1. Repeat the chronological audit evaluation on at least three materially
    different repositories and record hit@5, MRR, average results, abstention,
    unknown-target exclusions, and latency.
-2. Add rename-aware history so an old and new path contribute to one
-   relationship chain.
+2. Extend committed rename-chain history beyond exact mode. Exact mode follows
+   Git rename detection and combines old/new target paths. Both fast and exact
+   audits map an uncommitted staged rename to its old history path, while fast
+   pack queries still use the current path for older committed history. Make
+   chronological evaluation account for rename boundaries as well. Every audit
+   reports its level in `history_coverage.rename_tracking`.
 3. Calibrate confidence thresholds from holdout results instead of treating the
    initial repository-independent heuristic as final.
 4. Define stable CI exit semantics after confidence calibration; ordinary

@@ -288,6 +288,7 @@ fn cli_supports_json_format_for_all_commands() {
     );
     assert_eq!(audit["history_coverage"]["backend"], "GitCli");
     assert_eq!(audit["history_coverage"]["approximate"], false);
+    assert_eq!(audit["history_coverage"]["rename_tracking"], "git-follow");
 
     let eval = run_json(vec![
         "eval".to_string(),
@@ -644,6 +645,170 @@ fn git_backend_and_diff_support_unicode_paths() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.starts_with("related café.md direct\n"));
     assert!(text.contains("1 other.md co=1"));
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn exact_history_follows_target_renames_for_query_and_audit() {
+    let repo = new_test_repo();
+    let old_v1 = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+    let old_v2 = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten v2\n";
+    write_commit(
+        &repo,
+        "pair before rename one",
+        &[("src/old.md", old_v1), ("tests/companion.md", "test 1\n")],
+    );
+    write_commit(
+        &repo,
+        "pair before rename two",
+        &[("src/old.md", old_v2), ("tests/companion.md", "test 2\n")],
+    );
+
+    git(&repo, &["mv", "src/old.md", "src/new.md"]);
+    fs::write(repo.join("src/new.md"), format!("{old_v2}eleven\n")).unwrap();
+    fs::write(repo.join("tests/companion.md"), "test 3\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "rename target with companion"]);
+    write_commit(
+        &repo,
+        "pair after rename",
+        &[
+            ("src/new.md", &format!("{old_v2}eleven\ntwelve\n")),
+            ("tests/companion.md", "test 4\n"),
+        ],
+    );
+
+    let config = OnDemandConfig {
+        backend: OnDemandBackend::GitCli,
+        backend_explicit: false,
+        max_commits: 20,
+        since: None,
+        max_files_per_commit: 10,
+        half_life_days: 365.0,
+        evidence_limit: 5,
+        jobs: 1,
+        jobs_explicit: false,
+        scan_commits: 0,
+    };
+    let results =
+        git_log_direct_for_target(repo.to_str().unwrap(), "src/new.md", &config, 10).unwrap();
+    let companion = results
+        .iter()
+        .find(|item| item.path == "tests/companion.md")
+        .unwrap();
+    assert_eq!(companion.cochanges, 4);
+    assert_eq!(companion.evidence.len(), 4);
+    assert!(results.iter().all(|item| item.path != "src/old.md"));
+
+    let mut pagerank_output = Vec::new();
+    run_with_writer(
+        vec![
+            "query".to_string(),
+            "src/new.md".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+            "--mode".to_string(),
+            "pagerank".to_string(),
+        ],
+        &mut pagerank_output,
+    )
+    .unwrap();
+    let pagerank_text = String::from_utf8(pagerank_output).unwrap();
+    assert!(pagerank_text.contains("tests/companion.md co=4"));
+    assert!(!pagerank_text.contains("src/old.md"));
+
+    fs::write(repo.join("src/new.md"), "staged audit change\n").unwrap();
+    git(&repo, &["add", "src/new.md"]);
+    let mut audit_output = Vec::new();
+    run_with_writer(
+        vec![
+            "audit".to_string(),
+            "--staged".to_string(),
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--accuracy".to_string(),
+            "exact".to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ],
+        &mut audit_output,
+    )
+    .unwrap();
+    let audit: serde_json::Value = serde_json::from_slice(&audit_output).unwrap();
+    assert_eq!(audit["candidates"][0]["path"], "tests/companion.md");
+    assert_eq!(audit["candidates"][0]["cochanges"], 4);
+    assert_eq!(
+        audit["candidates"][0]["supported_by"],
+        serde_json::json!(["src/new.md"])
+    );
+    assert_eq!(audit["history_coverage"]["rename_tracking"], "git-follow");
+
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn staged_rename_audit_uses_the_old_path_history_in_fast_and_exact_modes() {
+    let repo = new_test_repo();
+    write_commit(
+        &repo,
+        "pair before staged rename one",
+        &[
+            ("src/old.md", "old 1\n"),
+            ("tests/companion.md", "test 1\n"),
+        ],
+    );
+    write_commit(
+        &repo,
+        "pair before staged rename two",
+        &[
+            ("src/old.md", "old 2\n"),
+            ("tests/companion.md", "test 2\n"),
+        ],
+    );
+    git(&repo, &["mv", "src/old.md", "src/new.md"]);
+
+    for (accuracy, expected_tracking) in [
+        ("fast", "diff-renames-only"),
+        ("exact", "git-follow+diff-renames"),
+    ] {
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "audit".to_string(),
+                "--staged".to_string(),
+                "--repo".to_string(),
+                repo.display().to_string(),
+                "--accuracy".to_string(),
+                accuracy.to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        let audit: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(audit["seeds"], serde_json::json!(["src/new.md"]));
+        assert_eq!(audit["candidates"][0]["path"], "tests/companion.md");
+        assert_eq!(audit["candidates"][0]["cochanges"], 2);
+        assert_eq!(
+            audit["candidates"][0]["supported_by"],
+            serde_json::json!(["src/new.md"])
+        );
+        assert_eq!(
+            audit["history_coverage"]["rename_tracking"],
+            expected_tracking
+        );
+        assert!(
+            audit["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|candidate| candidate["path"] != "src/old.md")
+        );
+    }
 
     fs::remove_dir_all(repo).ok();
 }

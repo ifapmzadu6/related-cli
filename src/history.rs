@@ -58,14 +58,107 @@ fn git_log_for_target_git(
     since: Option<&str>,
     remove_empty: bool,
 ) -> AnyResult<Vec<Commit>> {
+    let history = git_follow_target_history(repo, target, max_commits, since, remove_empty)?;
+    git_show_followed_commits(repo, target, &history)
+}
+
+struct GitFollowHistory {
+    hash_input: Vec<u8>,
+    hashes: Vec<String>,
+    target_paths_by_hash: HashMap<String, HashSet<String>>,
+}
+
+pub(crate) fn git_followed_commits_for_targets(
+    repo: &str,
+    targets: &[String],
+    config: &OnDemandConfig,
+) -> AnyResult<Vec<(String, Vec<Commit>)>> {
+    let jobs = config.jobs.min(targets.len()).max(1);
+    let mut ordered_histories = if jobs > 1 && targets.len() > 1 {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs).build()?;
+        pool.install(|| -> Result<Vec<_>, String> {
+            targets
+                .par_iter()
+                .enumerate()
+                .map(|(index, target)| {
+                    git_follow_target_history(
+                        repo,
+                        target,
+                        config.max_commits,
+                        config.since.as_deref(),
+                        false,
+                    )
+                    .map(|history| (index, target.clone(), history))
+                    .map_err(|err| err.to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?
+    } else {
+        targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| {
+                git_follow_target_history(
+                    repo,
+                    target,
+                    config.max_commits,
+                    config.since.as_deref(),
+                    false,
+                )
+                .map(|history| (index, target.clone(), history))
+            })
+            .collect::<AnyResult<Vec<_>>>()?
+    };
+    ordered_histories.sort_by_key(|(index, _, _)| *index);
+
+    let mut histories = Vec::with_capacity(ordered_histories.len());
+    let mut unique_hashes = HashSet::default();
+    let mut hashes = Vec::new();
+    for (_, target, history) in ordered_histories {
+        for hash in &history.hashes {
+            if unique_hashes.insert(hash.clone()) {
+                hashes.push(hash.clone());
+            }
+        }
+        histories.push((target, history));
+    }
+
+    let commits_by_hash = git_show_hashes(repo, &hashes, config.evidence_limit > 0)?;
+    let mut results = Vec::with_capacity(histories.len());
+    for (target, history) in histories {
+        let mut commits = Vec::with_capacity(history.hashes.len());
+        for hash in &history.hashes {
+            let mut commit = commits_by_hash
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| format!("missing expanded followed commit {hash}"))?;
+            canonicalize_followed_target_paths(
+                std::slice::from_mut(&mut commit),
+                &target,
+                &history.target_paths_by_hash,
+            );
+            commits.push(commit);
+        }
+        results.push((target, commits));
+    }
+    Ok(results)
+}
+
+fn git_follow_target_history(
+    repo: &str,
+    target: &str,
+    max_commits: usize,
+    since: Option<&str>,
+    remove_empty: bool,
+) -> AnyResult<GitFollowHistory> {
     let mut args = vec![
         "log".to_string(),
-        "--no-renames".to_string(),
-        "--full-diff".to_string(),
-        "--name-only".to_string(),
+        "--follow".to_string(),
+        "--find-renames".to_string(),
+        "--name-status".to_string(),
         "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s".to_string(),
+        "--pretty=format:%x1e%H".to_string(),
     ];
     if remove_empty {
         args.push("--remove-empty".to_string());
@@ -81,7 +174,65 @@ fn git_log_for_target_git(
     args.push(literal_pathspec(target));
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let out = run_git(Path::new(repo), &arg_refs)?;
-    parse_git_log(&out)
+    parse_git_follow_history(&out)
+}
+
+fn git_show_followed_commits(
+    repo: &str,
+    target: &str,
+    history: &GitFollowHistory,
+) -> AnyResult<Vec<Commit>> {
+    if history.hash_input.is_empty() {
+        return Ok(Vec::new());
+    }
+    let commits_by_hash = git_show_hashes(repo, &history.hashes, true)?;
+    let mut commits = Vec::with_capacity(history.hashes.len());
+    for hash in &history.hashes {
+        commits.push(
+            commits_by_hash
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| format!("missing expanded followed commit {hash}"))?,
+        );
+    }
+    canonicalize_followed_target_paths(&mut commits, target, &history.target_paths_by_hash);
+    Ok(commits)
+}
+
+fn git_show_hashes(
+    repo: &str,
+    hashes: &[String],
+    include_subject: bool,
+) -> AnyResult<HashMap<String, Commit>> {
+    const HASH_CHUNK_SIZE: usize = 512;
+    let pretty = if include_subject {
+        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s"
+    } else {
+        "--pretty=format:%x1e%H%x1f%ct%x1f%cI"
+    };
+    let args = [
+        "show",
+        "--stdin",
+        "--no-renames",
+        "--full-diff",
+        "--name-only",
+        "-z",
+        "--diff-filter=ACMRT",
+        pretty,
+    ];
+    let mut commits_by_hash = HashMap::default();
+    for chunk in hashes.chunks(HASH_CHUNK_SIZE) {
+        let mut input = Vec::with_capacity(chunk.len().saturating_mul(41));
+        for hash in chunk {
+            input.extend_from_slice(hash.as_bytes());
+            input.push(b'\n');
+        }
+        let out = run_git_with_stdin(Path::new(repo), &args, &input)?;
+        for commit in parse_git_log(&out)? {
+            commits_by_hash.insert(commit.hash.clone(), commit);
+        }
+    }
+    Ok(commits_by_hash)
 }
 
 pub(crate) fn git_log_for_target_batch(
@@ -215,35 +366,20 @@ fn git_log_direct_for_target_git(
     top: usize,
     remove_empty: bool,
 ) -> AnyResult<Vec<ResultItem>> {
-    let pretty = if config.evidence_limit == 0 {
-        "--pretty=format:%x1e%ct%x1f%cI"
-    } else {
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s"
-    };
-    let mut args = vec![
-        "log".to_string(),
-        "--no-renames".to_string(),
-        "--full-diff".to_string(),
-        "--name-only".to_string(),
-        "-z".to_string(),
-        "--diff-filter=ACMRT".to_string(),
-        pretty.to_string(),
-    ];
-    if remove_empty {
-        args.push("--remove-empty".to_string());
-    }
-    if config.max_commits > 0 {
-        args.push(format!("--max-count={}", config.max_commits));
-    }
-    if let Some(since) = &config.since {
-        args.push("--since".to_string());
-        args.push(since.clone());
-    }
-    args.push("--".to_string());
-    args.push(literal_pathspec(target));
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_git(Path::new(repo), &arg_refs)?;
-    parse_git_log_direct(&out, target, config, top, config.evidence_limit as isize)
+    let commits = git_log_for_target_git(
+        repo,
+        target,
+        config.max_commits,
+        config.since.as_deref(),
+        remove_empty,
+    )?;
+    Ok(crate::graph::query_direct_from_commits(
+        target,
+        &commits,
+        config,
+        top,
+        config.evidence_limit as isize,
+    ))
 }
 
 pub(crate) fn git_diff_tree_direct_for_target(
@@ -783,6 +919,96 @@ fn parse_git_log_record(raw_record: &[u8]) -> AnyResult<Option<GitLogRecord<'_>>
         }
     }
     Ok(Some(GitLogRecord { header, files }))
+}
+
+fn parse_git_follow_history(out: &[u8]) -> AnyResult<GitFollowHistory> {
+    let mut hash_input = Vec::new();
+    let mut hashes = Vec::new();
+    let mut target_paths_by_hash = HashMap::default();
+    for raw_record in out.split(|byte| *byte == 0x1e) {
+        let raw_record = raw_record
+            .iter()
+            .position(|byte| !matches!(*byte, 0 | b'\n' | b'\r'))
+            .map_or(&[][..], |start| &raw_record[start..]);
+        if raw_record.is_empty() {
+            continue;
+        }
+        let header_end = raw_record
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(raw_record.len());
+        let hash = std::str::from_utf8(&raw_record[..header_end])?.trim();
+        if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("invalid followed commit hash {hash:?}").into());
+        }
+        hash_input.extend_from_slice(hash.as_bytes());
+        hash_input.push(b'\n');
+        hashes.push(hash.to_string());
+
+        let file_bytes = raw_record.get(header_end + 1..).unwrap_or_default();
+        let tokens: Vec<&[u8]> = file_bytes
+            .split(|byte| *byte == 0)
+            .filter(|token| !token.is_empty())
+            .collect();
+        let mut idx = 0usize;
+        let mut target_paths = HashSet::default();
+        while idx < tokens.len() {
+            let status = tokens[idx];
+            idx += 1;
+            let path_count = if matches!(status.first(), Some(b'R' | b'C')) {
+                2
+            } else if matches!(status.first(), Some(b'A' | b'M' | b'T')) {
+                1
+            } else {
+                return Err(format!(
+                    "unsupported followed name-status token {:?}",
+                    String::from_utf8_lossy(status)
+                )
+                .into());
+            };
+            if idx.saturating_add(path_count) > tokens.len() {
+                return Err("truncated followed name-status record".into());
+            }
+            for raw_path in &tokens[idx..idx + path_count] {
+                let path = decode_git_path(raw_path)?;
+                if !path.is_empty() {
+                    target_paths.insert(path);
+                }
+            }
+            idx += path_count;
+        }
+        target_paths_by_hash.insert(hash.to_string(), target_paths);
+    }
+    Ok(GitFollowHistory {
+        hash_input,
+        hashes,
+        target_paths_by_hash,
+    })
+}
+
+fn canonicalize_followed_target_paths(
+    commits: &mut [Commit],
+    target: &str,
+    target_paths_by_hash: &HashMap<String, HashSet<String>>,
+) {
+    for commit in commits {
+        let Some(target_paths) = target_paths_by_hash.get(&commit.hash) else {
+            continue;
+        };
+        let mut seen = HashSet::default();
+        let mut canonical = Vec::with_capacity(commit.files.len());
+        for file in commit.files.drain(..) {
+            let file = if target_paths.contains(&file) {
+                target.to_string()
+            } else {
+                file
+            };
+            if seen.insert(file.clone()) {
+                canonical.push(file);
+            }
+        }
+        commit.files = canonical;
+    }
 }
 
 fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {

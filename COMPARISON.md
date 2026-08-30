@@ -229,15 +229,16 @@ On `microsoft/vscode`, using `package.json`, `--mode direct`, `--top 5`, and
 
 - `related` default `pack-fast`: `0.0926s/query` median in the latest
   randomized-order run, same top-5 path set as Git exact but approximate counts
-- `related` exact compact `git --no-renames`: `0.3695s/query` median in the
-  same run
+- `related` pre-rename exact compact `git --no-renames`: `0.3695s/query`
+  median in the same historical run; current exact mode follows renames and is
+  not represented by this query timing
 - `related` pack-only `pack-scan --scan-commits 17500`: not rerun in the latest
   pass; the previous median was `0.5181s/query`, with the same top-5 path set as
   Git exact
 - `related` pack-only `pack-scan --scan-commits 17500 --jobs 8`:
   `0.2007s/query` median, same top-5 path set as Git exact
-- earlier compact `git --no-renames`: `0.4104s/query` median in the previous
-  randomized-order run before the pack-only default
+- earlier pre-rename compact `git --no-renames`: `0.4104s/query` median in the
+  previous randomized-order run before the pack-only default
 - previous `git-diff-tree` default: `0.4483s/query` median in that earlier run
 
 For the same target, `--max-commits 200` was much faster (`0.1351s` median) but
