@@ -27,9 +27,11 @@ history coverage.
 - a 20-task editing-agent A/B that found no target-file accuracy improvement and
   measured higher token/time cost, plus three-repository historical pre-PR
   omission holdouts; no general agent-accuracy claim is made
+- a full-history GitHub Actions pull-request audit in this repository plus
+  documented Actions and local-hook recipes
 - legacy `related diff` compatibility
 
-## v1 completion gates
+## v1 product decisions
 
 For v1, fast deliberately stops at bounded exact-blob rename detection; adding
 similarity detection would duplicate exact mode's cost and weaken the latency
@@ -37,8 +39,11 @@ contract. Exact mode follows Git similarity detection and combines old/new
 target paths. Every audit reports its actual level in
 `history_coverage.rename_tracking`.
 
-1. Add hooks, Actions, or MCP integration now that the audit contract and
-   thresholds are supported by these measurements.
+The repository's own pull-request CI runs exact audit with high-confidence
+enforcement. Reusable Actions and hook recipes are documented, but hooks are not
+installed into contributor worktrees automatically. MCP remains optional rather
+than a v1 requirement because the stable CLI/JSON contract already composes with
+agent runtimes.
 
 ## Compatibility policy
 
