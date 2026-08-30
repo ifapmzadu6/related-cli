@@ -4,6 +4,10 @@ The v1 goal is to evolve `related` from a related-file shortlist into a
 changed-set omission audit with explicit evidence, support, confidence, and
 history coverage.
 
+Version 1.0.0 establishes the audit CLI, schema 2 JSON output, accuracy levels,
+and exit-code behavior below as the stable audit-first contract. Query-oriented
+commands retain their schema 1 compatibility contract.
+
 ## Implemented foundation
 
 - `related audit` for worktree, staged, and revision-range scopes
