@@ -236,7 +236,11 @@ related eval --task audit --test-commits 200 --train-commits 1000 --top 5
 ```
 
 Audit evaluation also reports candidate precision and task coverage for each
-confidence band. Run it on the target repository before enabling enforcement.
+confidence band. Rename aliases learned inside the training window are combined
+without crossing the holdout boundary. A rename in the currently evaluated
+commit is mapped like an uncommitted diff, but renames from other held-out test
+commits are not reused. Run the evaluator on the target repository before
+enabling enforcement.
 
 ### CI enforcement
 

@@ -135,6 +135,40 @@ new path with two co-changes. Fast audit reports `diff-renames-only` for that
 case because its older committed pack history remains current-path-only; exact
 reports `git-follow+diff-renames`.
 
+### Rename-aware chronological audit evaluation
+
+Added on 2026-08-30 JST. Audit evaluation now parses Git rename status before
+the train/test split. Rename chains contained in training are canonicalized to
+the path visible at the training boundary. For a test commit that itself
+contains a rename, only that commit's destination-to-source mapping is applied,
+matching staged-diff audit behavior. A rename from another held-out test commit
+is not shared, so the fixed historical holdout does not gain future or
+cross-test information.
+
+The direct/medium three-repository rerun produced:
+
+| repository | training renames | current-test renames | evaluated tasks | unknown targets | hit@5 | MRR |
+|---|---:|---:|---:|---:|---:|---:|
+| `related-cli` | 0 | 0 | 69 | 55 | 0.7101 | 0.5072 |
+| `too_tired_to_type` | 8 | 0 | 162 | 57 | 0.7716 | 0.6825 |
+| `vscode-edge-devtools` | 25 | 1 | 146 | 8 | 0.7123 | 0.5880 |
+
+Against the preceding path-name evaluation, `too_tired_to_type` recovered one
+additional task (125 rather than 124 hits) while MRR moved from 0.6905 to
+0.6825. `vscode-edge-devtools` moved from 145 to 146 evaluated tasks, reduced
+unknown targets from 9 to 8, and moved from 100 to 104 hits; hit@5 increased
+from 0.6897 to 0.7123 and MRR from 0.5625 to 0.5880. This is directional
+evidence for correct rename accounting, not a claim that canonicalization
+always improves every ranking metric.
+
+The evaluation canonicalizer is intentionally not injected into live fast
+queries. It reads a bounded global name-status history, whereas `pack-fast`
+keeps its latency advantage by walking one literal target path directly from
+Git objects. A Git `--follow` prepass would make fast pay much of exact mode's
+selection cost. Until a pack-native rename detector is measured, live audits
+keep the explicit contract: fast is current-path-only for committed history and
+exact is rename-aware.
+
 Reproduction examples:
 
 ```sh

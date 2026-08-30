@@ -14,6 +14,8 @@ history coverage.
 - audit JSON schema 2 with structured seeds and history coverage
 - public `--accuracy fast|exact` levels while retaining advanced backend flags
 - chronological leave-one-out audit evaluation through `related eval --task audit`
+- rename-aware chronological evaluation that canonicalizes training aliases and
+  maps only the current test diff without cross-holdout leakage
 - three-repository audit holdouts plus per-confidence precision and coverage
 - a holdout-selected high-confidence boundary of 25 strongest-pair co-changes
 - opt-in `--fail-on-confidence` enforcement with stable exit 3 for findings;
@@ -25,9 +27,8 @@ history coverage.
 1. Extend committed rename-chain history beyond exact mode. Exact mode follows
    Git rename detection and combines old/new target paths. Both fast and exact
    audits map an uncommitted staged rename to its old history path, while fast
-   pack queries still use the current path for older committed history. Make
-   chronological evaluation account for rename boundaries as well. Every audit
-   reports its level in `history_coverage.rename_tracking`.
+   pack queries still use the current path for older committed history. Every
+   audit reports its level in `history_coverage.rename_tracking`.
 2. Measure under-specified agent tasks and pre-PR audits. Do not claim a general
    agent-accuracy improvement unless it is reproduced without material token or
    latency regression.

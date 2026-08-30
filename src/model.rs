@@ -10,6 +10,18 @@ pub(crate) struct Commit {
     pub(crate) files: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct HistoryRename {
+    pub(crate) old_path: String,
+    pub(crate) new_path: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RenameAwareCommit {
+    pub(crate) commit: Commit,
+    pub(crate) renames: Vec<HistoryRename>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Evidence {
     pub(crate) hash: String,
@@ -218,6 +230,9 @@ pub(crate) struct AuditEvalReport {
     pub(crate) max_files_per_commit: usize,
     pub(crate) minimum_confidence: Confidence,
     pub(crate) confidence_thresholds: ConfidenceThresholds,
+    pub(crate) rename_tracking: String,
+    pub(crate) training_renames: usize,
+    pub(crate) test_diff_renames: usize,
     pub(crate) candidate_tasks: usize,
     pub(crate) evaluated_tasks: usize,
     pub(crate) skipped_unknown_targets: usize,
