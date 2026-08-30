@@ -1,7 +1,7 @@
 {
   "name": "related-cli",
-  "version": "0.4.2",
-  "description": "Content-blind related-file ranking from Git co-change history",
+  "version": "1.0.0",
+  "description": "Audit changed sets for omitted companion files using Git co-change history",
   "license": "MIT",
   "repository": {
     "type": "git",
