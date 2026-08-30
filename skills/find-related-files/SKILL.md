@@ -1,106 +1,57 @@
 ---
 name: find-related-files
-description: Find likely companion files from Git co-change history when an editing or review task starts from one or a few files and the full file scope is uncertain. Use to discover non-obvious tests, configs, docs, migrations, or platform counterparts, and before a commit or PR to audit the changed set for missed companion updates. Skip pre-edit history when the task already names the complete target set and direct path or text search resolves it.
+description: Audit a Git worktree, staged change, or pull-request range for omitted companion files before committing or reviewing. Use when a changed set may be missing historically coupled tests, docs, configs, migrations, generated metadata, or platform counterparts.
 ---
 
-# Find Related Files
+# Audit Related Files
 
-## Overview
+Run one changed-set omission audit near the end of an editing or review task.
+Explicit task requirements, the current diff, and tests remain authoritative.
 
-Use `related-cli` as a lightweight context expansion step when the likely edit
-scope is incomplete. It ranks files that changed together in Git history, so it
-can surface tests, configs, docs, migrations, and companion code that text
-search may miss. If the task already identifies the complete edit set and
-direct search resolves it, skip the pre-edit history query. A single changed-set
-query can still be useful before a commit or PR as a completeness audit.
+## Choose the changed set
 
-## Workflow
-
-First extract the explicit task scope: named components, screens, platforms,
-layers, and tests. Search paths or source text for every explicit target. Use
-history only when companion-file scope remains uncertain.
-Explicit task requirements override the ranking.
-
-## Pre-commit and pre-PR audit
-
-Before committing or opening a PR, aggregate the current changed set once. Use
-the first form for unstaged edits and the second for staged edits:
+Use exactly one scope that matches the work being checked:
 
 ```sh
+# Unstaged, staged, and untracked non-ignored worktree changes
 env npm_config_loglevel=error npx -y --package related-cli@latest related audit
+
+# Staged changes only
 env npm_config_loglevel=error npx -y --package related-cli@latest related audit --staged
+
+# Pull-request or branch range
+env npm_config_loglevel=error npx -y --package related-cli@latest related audit --range main..HEAD
 ```
 
-Do not query every changed file separately. Compare the candidates with the task
-and current diff, then directly inspect likely omissions such as documentation,
-tests, configuration, generated metadata, migrations, and cross-platform
-counterparts. The output shows which changed files support each candidate and
-omits low-confidence one-off relationships by default. Confidence is an
-evidence-strength heuristic, not a probability or a reason to edit a file. If
-both staged and unstaged changes exist, audit each set once.
+If staged and unstaged work represent different intended changes, audit each set
+once. Do not run one audit per changed file and do not repeat an identical audit.
 
-## Query discipline
+## Review candidates
 
-For a seed-file lookup, run:
+For each candidate, use `supported_by`, co-change counts, and evidence commits to
+decide whether it is a plausible omission. Inspect the current task and diff
+before editing it. Common omissions include tests, docs, configuration,
+migrations, generated metadata, and cross-platform counterparts.
+
+Confidence is evidence strength, not a probability or an instruction to edit.
+An empty or abstained result means the available history did not support a
+candidate strongly enough; it does not prove the change set is complete.
+
+Use exact history for a final CI-equivalent check when rename completeness
+matters:
 
 ```sh
-env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20
+env npm_config_loglevel=error npx -y --package related-cli@latest related audit --staged --accuracy exact
 ```
 
-Run from the repository root when possible. Use `--repo PATH` only when querying
-another checkout from outside that repository:
+Follow any emitted `hint:` before relying on the result. Add `--evidence 3` when
+the shared commits are needed to judge a candidate. Never enable
+`--fail-on-confidence` unless the repository has intentionally adopted an
+enforcement threshold.
 
-```sh
-env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --repo /path/to/repo --top 20
-```
+## Distribution
 
-Run the seed query once. Do not repeat an identical query. Then use direct path
-or source-text search to resolve every explicit target. Default to one related
-query per task; run at most one additional query only when a genuinely
-independent surface remains unresolved after the first result and direct
-search. Stop querying once the requested edit scope is clear.
-
-Open the strongest relevant results before making edits, but treat them only as
-additional discovery candidates:
-
-- Do not drop an explicit target because it is absent from the ranking.
-- Do not substitute a similarly named result for a requested target.
-- Edit a candidate only after the task, direct references, or tests confirm it.
-- Recheck every explicit target and run relevant tests before finishing.
-
-If the output includes `hint:` lines, follow them before opening many files. Add
-`--evidence N` when another tool needs example commits behind the ranking.
-
-If the top results look like broad release, dependency, formatting, generated,
-or initial commit churn, inspect evidence and retry with a tighter commit-size
-filter plus result exclusions before opening files:
-
-```sh
-env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --evidence 3
-env npm_config_loglevel=error npx -y --package related-cli@latest related query path/to/file --top 20 --max-files-per-commit 10 --exclude '*.lock,*-lock.*,*lockb,.github/workflows/*'
-```
-
-## Options
-
-- Add `--evidence N` when examples of shared commits would help.
-- Add `--exclude PATTERNS` to hide comma-separated path patterns such as
-  `*.lock,*-lock.*,*lockb,.github/workflows/*` from results.
-- Add `--format json` only when another tool needs structured output; compact
-  text is smaller for ordinary agent context.
-- Use `explain file-a file-b` to inspect one relationship.
-- Use `--history-backend git` when exact Git history is more important than
-  low latency.
-- Use the default `pack-fast` backend for a fast approximate pre-edit check in
-  large workspaces. It automatically falls back to Git when the repository's
-  object format or storage layout is unsupported.
-
-## Distribution Notes
-
-Do not require global installation. The installer pins runtime query commands in
-the copied skill to the package version that supplied it, making ordinary skill
-runs reproducible. Pick up CLI fixes and performance improvements by pulling
-this repository or by rerunning
-`npx -y --package related-cli@latest related-install-skill` for a Codex project
-install from the target project root. Use
-`related-install-skill claude` for a Claude Code project install, and use
+Do not require global installation. Rerun
+`npx -y --package related-cli@latest related-install-skill` to update a Codex
+project install. Use `related-install-skill claude` for Claude Code and use
 `--user` only when a user-level install is intentional.

@@ -1,6 +1,6 @@
 {
   "name": "related-cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Audit changed sets for omitted companion files using Git co-change history",
   "license": "MIT",
   "repository": {
@@ -23,9 +23,7 @@
     "npm/scripts/verify-prebuilt.js",
     "docs/**",
     "README.md",
-    "COMPARISON.md",
-    "MEASUREMENTS.md",
-    "BENCHMARK.md"
+    "MEASUREMENTS.md"
   ],
   "scripts": {
     "postinstall": "node npm/scripts/postinstall.js",

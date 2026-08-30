@@ -21,6 +21,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn top_level_help_focuses_on_omission_auditing() {
+    let mut output = Vec::new();
+    run_with_writer(vec!["--help".to_string()], &mut output).unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("related audit"));
+    assert!(text.contains("related eval"));
+    assert!(text.contains("changed-set omission"));
+    assert!(!text.contains("related query"));
+    assert!(!text.contains("related explain"));
+    assert!(!text.contains("related diff"));
+}
+
+#[test]
 fn graph_query_explain_and_eval() {
     let repo = new_test_repo();
     write_commit(
@@ -297,8 +310,10 @@ fn cli_supports_json_format_for_all_commands() {
     assert_eq!(audit["history_coverage"]["approximate"], false);
     assert_eq!(audit["history_coverage"]["rename_tracking"], "git-follow");
 
-    let eval = run_json(vec![
+    let legacy_eval = run_json(vec![
         "eval".to_string(),
+        "--task".to_string(),
+        "query".to_string(),
         "--repo".to_string(),
         repo.display().to_string(),
         "--test-commits".to_string(),
@@ -310,14 +325,12 @@ fn cli_supports_json_format_for_all_commands() {
         "--format".to_string(),
         "json".to_string(),
     ]);
-    assert_eq!(eval["schema_version"], 1);
-    assert_eq!(eval["query_shape"], "on-demand");
-    assert_eq!(eval["metrics"][0]["mode"], "direct");
+    assert_eq!(legacy_eval["schema_version"], 1);
+    assert_eq!(legacy_eval["query_shape"], "on-demand");
+    assert_eq!(legacy_eval["metrics"][0]["mode"], "direct");
 
     let audit_eval = run_json(vec![
         "eval".to_string(),
-        "--task".to_string(),
-        "audit".to_string(),
         "--repo".to_string(),
         repo.display().to_string(),
         "--test-commits".to_string(),
@@ -642,7 +655,7 @@ fn cli_query_rejects_missing_targets_and_non_finite_decay() {
 }
 
 #[test]
-fn cli_eval_defaults_to_on_demand_and_keeps_global_available() {
+fn cli_legacy_query_eval_keeps_on_demand_and_global_available() {
     let repo = new_test_repo();
     write_commit(&repo, "pair one", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
     write_commit(&repo, "pair two", &[("a.md", "a2\n"), ("b.md", "b2\n")]);
@@ -657,6 +670,8 @@ fn cli_eval_defaults_to_on_demand_and_keeps_global_available() {
     ] {
         let mut args = vec![
             "eval".to_string(),
+            "--task".to_string(),
+            "query".to_string(),
             "--repo".to_string(),
             repo.display().to_string(),
             "--test-commits".to_string(),
