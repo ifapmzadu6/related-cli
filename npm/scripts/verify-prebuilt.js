@@ -1,17 +1,16 @@
 "use strict";
 
 const fs = require("fs");
-const path = require("path");
 
-const manifest = require("../prebuilt/manifest.json");
+const { targets, binaryPath } = require("../lib/prebuilt");
 
 if (process.env.RELATED_NPM_ALLOW_MISSING_PREBUILT === "1") {
   process.exit(0);
 }
 
 const missing = [];
-for (const target of Object.values(manifest.targets)) {
-  const binary = path.join(__dirname, "..", "prebuilt", target.triple, target.binary);
+for (const target of Object.values(targets)) {
+  const binary = binaryPath(target);
   if (!fs.existsSync(binary)) {
     missing.push(`${target.triple}/${target.binary}`);
   }
