@@ -1,8 +1,12 @@
 use crate::git_utils::git_path_is_tracked;
-use crate::model::*;
+use crate::model::{
+    Commit, DirectPairStat, DirectScoredPair, Evidence, FileStat, GraphBuildConfig, GraphData,
+    OnDemandConfig, PairStat, ResultItem, direct_pair_capacity,
+};
 use crate::path_utils::{
     normalize_input_path, ordered_pair, pair_key, path_basename, path_similarity, path_tokens,
 };
+use crate::ranking::truncate_top_by;
 use crate::{AnyResult, DEFAULT_HALF_LIFE_DAYS, DEFAULT_MAX_FILES};
 use rustc_hash::FxHashMap as HashMap;
 use std::cmp::Ordering;
@@ -183,6 +187,10 @@ pub(crate) fn query_direct_from_commits(
 }
 
 impl<'a> RelatedGraph<'a> {
+    pub(crate) fn pair(&self, a: &str, b: &str) -> Option<&PairStat> {
+        self.pairs.get(&pair_key(a, b))
+    }
+
     pub(crate) fn new(data: &'a GraphData) -> Self {
         let mut pairs = HashMap::default();
         let mut adj: HashMap<String, HashMap<String, f64>> = HashMap::default();
@@ -533,32 +541,12 @@ pub(crate) fn time_decay(latest: i64, when: i64, half_life_days: f64) -> f64 {
     (-std::f64::consts::LN_2 * age_days / half_life_days).exp()
 }
 
-fn sort_results(results: &mut [ResultItem]) {
-    results.sort_unstable_by(result_cmp);
-}
-
 pub(crate) fn truncate_top_results(results: &mut Vec<ResultItem>, top: usize) {
-    if top == 0 {
-        results.clear();
-        return;
-    }
-    if results.len() > top {
-        results.select_nth_unstable_by(top, result_cmp);
-        results.truncate(top);
-    }
-    sort_results(results);
+    truncate_top_by(results, top, result_cmp);
 }
 
 pub(crate) fn truncate_top_direct_pairs(results: &mut Vec<DirectScoredPair>, top: usize) {
-    if top == 0 {
-        results.clear();
-        return;
-    }
-    if results.len() > top {
-        results.select_nth_unstable_by(top, direct_scored_pair_cmp);
-        results.truncate(top);
-    }
-    results.sort_unstable_by(direct_scored_pair_cmp);
+    truncate_top_by(results, top, direct_scored_pair_cmp);
 }
 
 fn result_cmp(left: &ResultItem, right: &ResultItem) -> Ordering {
@@ -573,4 +561,19 @@ fn direct_scored_pair_cmp(left: &DirectScoredPair, right: &DirectScoredPair) -> 
         .score
         .total_cmp(&left.score)
         .then(left.path.cmp(&right.path))
+}
+
+pub(crate) struct RelatedGraph<'a> {
+    pub(crate) data: &'a GraphData,
+    pairs: HashMap<String, PairStat>,
+    adj: HashMap<String, HashMap<String, f64>>,
+    degree: HashMap<String, f64>,
+    paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GraphPathMatch<'a> {
+    Known(String),
+    Missing(String),
+    Ambiguous(Vec<&'a str>),
 }

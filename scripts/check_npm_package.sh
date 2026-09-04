@@ -15,6 +15,16 @@ tarball="$tmp/related-cli-$version.tgz"
 (cd "$ROOT" && RELATED_NPM_ALLOW_MISSING_PREBUILT=1 npm pack --pack-destination "$tmp" >/dev/null)
 test -f "$tarball"
 
+# Require shared runtime code from the tarball, not the source checkout.
+mkdir -p "$tmp/unpacked"
+tar -xzf "$tarball" -C "$tmp/unpacked"
+node - "$tmp/unpacked/package/npm/lib/prebuilt.js" <<'NODE'
+const { targets, selectedBinary } = require(process.argv[2]);
+if (Object.keys(targets).length === 0 || typeof selectedBinary() !== "string") {
+  throw new Error("packaged runtime cannot resolve a bundled binary");
+}
+NODE
+
 project="$tmp/project"
 mkdir -p "$project"
 

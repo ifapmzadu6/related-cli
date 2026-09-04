@@ -19,6 +19,7 @@
     "npm/bin/install-skill.js",
     "npm/bin/related.js",
     "npm/prebuilt/**",
+    "npm/lib/**",
     "npm/scripts/postinstall.js",
     "npm/scripts/verify-prebuilt.js",
     "docs/**",

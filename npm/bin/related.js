@@ -2,24 +2,9 @@
 "use strict";
 
 const fs = require("fs");
-const path = require("path");
 const { spawnSync } = require("child_process");
 
-const manifest = require("../prebuilt/manifest.json");
-
-function platformKey() {
-  return `${process.platform}-${process.arch}`;
-}
-
-function selectedBinary() {
-  const key = platformKey();
-  const target = manifest.targets[key];
-  if (!target) {
-    const supported = Object.keys(manifest.targets).sort().join(", ");
-    throw new Error(`unsupported platform ${key}; supported: ${supported}`);
-  }
-  return path.join(__dirname, "..", "prebuilt", target.triple, target.binary);
-}
+const { platformKey, selectedBinary, makeExecutable } = require("../lib/prebuilt");
 
 function main() {
   let binary;
@@ -37,11 +22,7 @@ function main() {
   }
 
   if (process.platform !== "win32") {
-    try {
-      fs.chmodSync(binary, 0o755);
-    } catch (_) {
-      // If chmod fails, spawn will report the real execution error below.
-    }
+    makeExecutable(binary);
   }
 
   const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });

@@ -1,6 +1,7 @@
 mod audit;
 mod cli;
 mod commands;
+mod engine;
 mod evaluation;
 mod filters;
 mod git_utils;
@@ -10,8 +11,8 @@ mod model;
 mod output;
 mod pack;
 mod path_utils;
+mod ranking;
 mod repo;
-
 use std::error::Error;
 use std::fmt;
 

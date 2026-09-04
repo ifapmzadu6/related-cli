@@ -63,36 +63,6 @@ pub(crate) struct DirectScoredPair {
     pub(crate) score: f64,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct PackDirectPairStat {
-    pub(crate) cochanges: usize,
-    pub(crate) weight: f64,
-    pub(crate) other_weight: f64,
-    pub(crate) last_seen_time: Option<i64>,
-    pub(crate) last_seen_offset: i32,
-    pub(crate) evidence: Vec<Evidence>,
-}
-
-pub(crate) struct PackDirectScoredPair {
-    pub(crate) path: String,
-    pub(crate) pair: PackDirectPairStat,
-    pub(crate) score: f64,
-}
-
-pub(crate) struct PackDirectPartial {
-    pub(crate) target_weight: f64,
-    pub(crate) pairs: HashMap<String, PackDirectPairStat>,
-}
-
-impl PackDirectPartial {
-    pub(crate) fn new(top: usize) -> Self {
-        Self {
-            target_weight: 0.0,
-            pairs: HashMap::with_capacity_and_hasher(direct_pair_capacity(top), Default::default()),
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct GraphData {
     pub(crate) files: HashMap<String, FileStat>,
@@ -276,32 +246,6 @@ pub(crate) struct EvalMetrics {
     pub(crate) recall_at_k: f64,
     pub(crate) mrr: f64,
     pub(crate) avg_results: f64,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct EvalAccumulator {
-    pub(crate) mode: String,
-    pub(crate) tasks: usize,
-    pub(crate) hit_tasks: usize,
-    pub(crate) precision_sum: f64,
-    pub(crate) recall_sum: f64,
-    pub(crate) mrr_sum: f64,
-    pub(crate) results_sum: usize,
-}
-
-pub(crate) struct RelatedGraph<'a> {
-    pub(crate) data: &'a GraphData,
-    pub(crate) pairs: HashMap<String, PairStat>,
-    pub(crate) adj: HashMap<String, HashMap<String, f64>>,
-    pub(crate) degree: HashMap<String, f64>,
-    pub(crate) paths: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum GraphPathMatch<'a> {
-    Known(String),
-    Missing(String),
-    Ambiguous(Vec<&'a str>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

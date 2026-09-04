@@ -136,6 +136,11 @@ fn compare_candidates(left: &AuditCandidate, right: &AuditCandidate) -> Ordering
         .then(left.path.cmp(&right.path))
 }
 
+/// Keep discovery and chronological evaluation on the same candidate budget.
+pub(crate) fn audit_query_limit(top: usize) -> usize {
+    top.saturating_mul(8).max(64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
