@@ -12,8 +12,8 @@ use crate::filters::{
     path_matches_any_pattern, query_hints,
 };
 use crate::git_utils::{
-    git_diff_audit_paths, git_diff_audit_paths_for_range, git_diff_names, git_path_is_tracked,
-    git_worktree_audit_paths,
+    git_audit_candidate_paths, git_diff_audit_paths, git_diff_audit_paths_for_range,
+    git_diff_names, git_path_is_tracked, git_worktree_audit_paths,
 };
 use crate::graph::{build_graph_data, query_direct_from_commits};
 use crate::history::{
@@ -666,6 +666,8 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
     if audit_paths.is_empty() {
         return Err(format!("no changed files found for {scope}").into());
     }
+    let candidate_paths =
+        git_audit_candidate_paths(root, flag_optional_string(&parsed, "range").as_deref())?;
     let seeds: Vec<String> = audit_paths.iter().map(|path| path.path.clone()).collect();
     let history_targets: Vec<String> = audit_paths
         .iter()
@@ -692,7 +694,8 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
             let mut results =
                 query_from_commits(root, &history_seed, &commits, &mode, per_seed_top, &config)?;
             results.retain(|result| {
-                !changed_paths.contains(&result.path)
+                candidate_paths.contains(&result.path)
+                    && !changed_paths.contains(&result.path)
                     && !path_matches_any_pattern(&result.path, &exclude_patterns)
             });
             results_by_seed.push((seed.clone(), results));
@@ -706,7 +709,8 @@ fn cmd_audit<W: Write>(args: &[String], out: &mut W) -> AnyResult<()> {
                 runtime_backend_hint = hint;
             }
             results.retain(|result| {
-                !changed_paths.contains(&result.path)
+                candidate_paths.contains(&result.path)
+                    && !changed_paths.contains(&result.path)
                     && !path_matches_any_pattern(&result.path, &exclude_patterns)
             });
             results_by_seed.push((seed.clone(), results));

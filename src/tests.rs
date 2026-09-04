@@ -375,6 +375,134 @@ fn cli_supports_json_format_for_all_commands() {
 }
 
 #[test]
+fn worktree_audit_includes_staged_changes_and_preserves_rename_history() {
+    let repo = new_test_repo();
+    write_commit(&repo, "pair one", &[("a.md", "a1\n"), ("b.md", "b1\n")]);
+    write_commit(&repo, "pair two", &[("a.md", "a2\n"), ("b.md", "b2\n")]);
+    fs::write(repo.join("a.md"), "staged\n").unwrap();
+    git(&repo, &["add", "a.md"]);
+
+    let audit = |accuracy: &str| {
+        let mut output = Vec::new();
+        run_with_writer(
+            vec![
+                "audit".into(),
+                "--repo".into(),
+                repo.display().to_string(),
+                "--accuracy".into(),
+                accuracy.into(),
+                "--format".into(),
+                "json".into(),
+            ],
+            &mut output,
+        )
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    for accuracy in ["fast", "exact"] {
+        let result = audit(accuracy);
+        assert_eq!(result["seeds"], serde_json::json!(["a.md"]));
+        assert_eq!(result["candidates"][0]["path"], "b.md");
+    }
+
+    git(&repo, &["checkout", "HEAD", "--", "a.md"]);
+    git(&repo, &["mv", "a.md", "renamed.md"]);
+    fs::write(
+        repo.join("renamed.md"),
+        "unstaged edit after staged rename\n",
+    )
+    .unwrap();
+    fs::write(repo.join("new.md"), "untracked\n").unwrap();
+    for accuracy in ["fast", "exact"] {
+        let result = audit(accuracy);
+        assert_eq!(result["seeds"], serde_json::json!(["new.md", "renamed.md"]));
+        assert_eq!(result["candidates"][0]["path"], "b.md");
+        assert_eq!(result["candidates"][0]["cochanges"], 2);
+        assert_eq!(
+            result["candidates"][0]["supported_by"],
+            serde_json::json!(["renamed.md"])
+        );
+    }
+    // A staged companion must be counted as changed, not reported as omitted.
+    fs::write(repo.join("b.md"), "staged companion\n").unwrap();
+    git(&repo, &["add", "b.md"]);
+    for accuracy in ["fast", "exact"] {
+        let result = audit(accuracy);
+        assert_eq!(
+            result["seeds"],
+            serde_json::json!(["b.md", "new.md", "renamed.md"])
+        );
+        assert_eq!(result["candidates"], serde_json::json!([]));
+    }
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
+fn audit_excludes_deleted_candidates_but_respects_historical_range_endpoints() {
+    let repo = new_test_repo();
+    for i in 0..25 {
+        let content = format!("revision {i}\n");
+        write_commit(
+            &repo,
+            "paired change",
+            &[("a.md", &content), ("b.md", &content)],
+        );
+    }
+    git(&repo, &["tag", "audit-base"]);
+    write_commit(&repo, "historical change", &[("a.md", "historical\n")]);
+    git(&repo, &["tag", "audit-head"]);
+    git(&repo, &["rm", "b.md"]);
+    git(&repo, &["commit", "-m", "delete companion"]);
+    fs::write(repo.join("a.md"), "current change\n").unwrap();
+    git(&repo, &["add", "a.md"]);
+
+    for accuracy in ["fast", "exact"] {
+        for scope in [
+            vec![],
+            vec!["--staged"],
+            vec!["--range", "audit-base..HEAD"],
+            vec!["--range", "audit-base.."],
+            vec!["--range", "audit-base...HEAD"],
+            vec!["--range", "audit-base..audit-head"],
+            vec!["--range", "audit-base...audit-head"],
+        ] {
+            let historical = scope
+                .last()
+                .is_some_and(|value| value.ends_with("audit-head"));
+            let mut args = vec![
+                "audit".into(),
+                "--repo".into(),
+                repo.display().to_string(),
+                "--accuracy".into(),
+                accuracy.into(),
+                "--format".into(),
+                "json".into(),
+                "--fail-on-confidence".into(),
+                "high".into(),
+            ];
+            args.extend(scope.iter().map(|value| value.to_string()));
+            let mut output = Vec::new();
+            let result = run_with_writer(args, &mut output);
+            let audit: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            if historical {
+                assert_eq!(crate::exit_code_for_error(result.unwrap_err().as_ref()), 3);
+                assert_eq!(audit["candidates"][0]["path"], "b.md");
+                assert_eq!(audit["candidates"][0]["confidence"], "high");
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    audit["candidates"],
+                    serde_json::json!([]),
+                    "{accuracy} {scope:?}"
+                );
+                assert_eq!(audit["enforcement"]["triggered"], false);
+            }
+        }
+    }
+    fs::remove_dir_all(repo).ok();
+}
+
+#[test]
 fn cli_subcommands_provide_help_without_repository_access() {
     for command in ["query", "explain", "audit", "diff", "eval"] {
         let mut output = Vec::new();
