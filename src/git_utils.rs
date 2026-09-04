@@ -1,5 +1,6 @@
 use crate::AnyResult;
 use crate::path_utils::{decode_git_path, literal_pathspec};
+use rustc_hash::FxHashSet as HashSet;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -152,7 +153,18 @@ pub(crate) fn git_diff_audit_paths(repo: &str, staged: bool) -> AnyResult<Vec<Au
 }
 
 pub(crate) fn git_worktree_audit_paths(repo: &str) -> AnyResult<Vec<AuditPath>> {
-    let mut paths = git_diff_audit_paths(repo, false)?;
+    let mut paths = git_diff_audit_paths(repo, true)?;
+    for mut path in git_diff_audit_paths(repo, false)? {
+        // The unstaged diff is relative to the index. Preserve the HEAD path
+        // when an indexed rename is edited or renamed again in the worktree.
+        if let Some(index) = paths
+            .iter()
+            .position(|staged| staged.path == path.history_path)
+        {
+            path.history_path = paths.remove(index).history_path;
+        }
+        paths.push(path);
+    }
     let out = run_git(
         repo,
         &["ls-files", "--others", "--exclude-standard", "-z", "--"],
@@ -169,6 +181,39 @@ pub(crate) fn git_worktree_audit_paths(repo: &str) -> AnyResult<Vec<AuditPath>> 
     paths.sort_by(|left, right| left.path.cmp(&right.path));
     paths.dedup_by(|left, right| left.path == right.path);
     Ok(paths)
+}
+
+pub(crate) fn git_audit_candidate_paths(
+    repo: &str,
+    range: Option<&str>,
+) -> AnyResult<HashSet<String>> {
+    let out = if let Some((_, endpoint)) = range.and_then(|range| range.rsplit_once("..")) {
+        // Both A..B and A...B describe changes ending at B. An omitted B is HEAD.
+        let endpoint = if endpoint.is_empty() {
+            "HEAD"
+        } else {
+            endpoint
+        };
+        let tree = run_git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{endpoint}^{{tree}}"),
+            ],
+        )?;
+        let tree = std::str::from_utf8(&tree)?.trim();
+        run_git(repo, &["ls-tree", "-r", "--name-only", "-z", tree, "--"])?
+    } else {
+        // Index membership also works with sparse checkouts and broken symlinks.
+        // Worktree deletions are already excluded through the changed set.
+        run_git(repo, &["ls-files", "--cached", "-z", "--"])?
+    };
+    out.split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(decode_git_path)
+        .collect()
 }
 
 pub(crate) fn git_diff_audit_paths_for_range(repo: &str, range: &str) -> AnyResult<Vec<AuditPath>> {
