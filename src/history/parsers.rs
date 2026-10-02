@@ -11,7 +11,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 struct GitLogRecord<'a> {
     header: &'a str,
-    files: Vec<String>,
+    file_bytes: &'a [u8],
 }
 
 pub(super) struct GitFollowHistory {
@@ -33,37 +33,41 @@ pub(super) fn parse_commit_seeds(input: &[u8]) -> AnyResult<Vec<GixCommitSeed>> 
         .collect()
 }
 
-fn parse_git_log_record(raw_record: &[u8]) -> AnyResult<Option<GitLogRecord<'_>>> {
-    let raw_record = raw_record
-        .iter()
-        .position(|byte| *byte != b'\n' && *byte != 0)
-        .map_or(&[][..], |start| &raw_record[start..]);
-    if raw_record.is_empty() {
-        return Ok(None);
-    }
+fn git_log_records(out: &[u8]) -> impl Iterator<Item = AnyResult<GitLogRecord<'_>>> {
+    let mut remaining = out;
+    std::iter::from_fn(move || {
+        // Git inserts NUL between commits, in addition to our header framing.
+        let start = remaining.iter().position(|byte| *byte != 0)?;
+        remaining = &remaining[start..];
+        let Some(header_end) = remaining.iter().position(|byte| *byte == 0) else {
+            remaining = &[];
+            return Some(Err("unterminated git log header".into()));
+        };
+        let header = &remaining[..header_end];
+        remaining = &remaining[header_end + 1..];
+        // Strip exactly Git's header/diff separator, preserving a leading LF
+        // in the first path. Subsequent paths are already separated by NUL.
+        remaining = remaining.strip_prefix(b"\n").unwrap_or(remaining);
+        // An empty NUL token ends the paths, also covering empty commits.
+        let file_end = remaining
+            .split_inclusive(|byte| *byte == 0)
+            .take_while(|token| *token != b"\0")
+            .map(|token| token.len())
+            .sum::<usize>();
+        let file_bytes = &remaining[..file_end];
+        remaining = &remaining[file_end..];
+        Some(
+            std::str::from_utf8(header)
+                .map(|header| GitLogRecord { header, file_bytes })
+                .map_err(Into::into),
+        )
+    })
+}
 
-    let header_end = raw_record
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .unwrap_or_else(|| {
-            raw_record
-                .iter()
-                .position(|byte| *byte == 0)
-                .unwrap_or(raw_record.len())
-        });
-    let header = std::str::from_utf8(&raw_record[..header_end])?;
-    if header.is_empty() {
-        return Ok(None);
-    }
-
-    let file_bytes = match raw_record.get(header_end) {
-        Some(b'\n' | 0) => &raw_record[header_end + 1..],
-        _ => &[],
-    };
-    let separator = if file_bytes.contains(&0) { 0 } else { b'\n' };
+fn parse_git_log_files(file_bytes: &[u8]) -> AnyResult<Vec<String>> {
     let mut files = Vec::new();
     for raw_path in file_bytes
-        .split(|byte| *byte == separator)
+        .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
     {
         let path = decode_git_path(raw_path)?;
@@ -71,26 +75,16 @@ fn parse_git_log_record(raw_record: &[u8]) -> AnyResult<Option<GitLogRecord<'_>>
             files.push(path);
         }
     }
-    Ok(Some(GitLogRecord { header, files }))
+    Ok(files)
 }
 
 pub(super) fn parse_git_follow_history(out: &[u8]) -> AnyResult<GitFollowHistory> {
     let mut hash_input = Vec::new();
     let mut hashes = Vec::new();
     let mut target_paths_by_hash = HashMap::default();
-    for raw_record in out.split(|byte| *byte == 0x1e) {
-        let raw_record = raw_record
-            .iter()
-            .position(|byte| !matches!(*byte, 0 | b'\n' | b'\r'))
-            .map_or(&[][..], |start| &raw_record[start..]);
-        if raw_record.is_empty() {
-            continue;
-        }
-        let header_end = raw_record
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .unwrap_or(raw_record.len());
-        let hash = std::str::from_utf8(&raw_record[..header_end])?.trim();
+    for record in git_log_records(out) {
+        let record = record?;
+        let hash = record.header;
         if hash.is_empty() || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(format!("invalid followed commit hash {hash:?}").into());
         }
@@ -98,8 +92,8 @@ pub(super) fn parse_git_follow_history(out: &[u8]) -> AnyResult<GitFollowHistory
         hash_input.push(b'\n');
         hashes.push(hash.to_string());
 
-        let file_bytes = raw_record.get(header_end + 1..).unwrap_or_default();
-        let tokens: Vec<&[u8]> = file_bytes
+        let tokens: Vec<&[u8]> = record
+            .file_bytes
             .split(|byte| *byte == 0)
             .filter(|token| !token.is_empty())
             .collect();
@@ -141,10 +135,8 @@ pub(super) fn parse_git_follow_history(out: &[u8]) -> AnyResult<GitFollowHistory
 
 pub(super) fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
     let mut commits = Vec::new();
-    for raw_record in out.split(|byte| *byte == 0x1e) {
-        let Some(record) = parse_git_log_record(raw_record)? else {
-            continue;
-        };
+    for record in git_log_records(out) {
+        let record = record?;
         let mut fields = record.header.splitn(4, '\x1f');
         let hash = fields.next().ok_or("missing commit hash")?.to_string();
         let unix_time: i64 = fields
@@ -156,7 +148,7 @@ pub(super) fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
         let subject = fields.next().unwrap_or_default().to_string();
         let mut seen = HashSet::default();
         let mut files = Vec::new();
-        for file in record.files {
+        for file in parse_git_log_files(record.file_bytes)? {
             if file.is_empty() || !seen.insert(file.clone()) {
                 continue;
             }
@@ -175,20 +167,9 @@ pub(super) fn parse_git_log(out: &[u8]) -> AnyResult<Vec<Commit>> {
 
 pub(super) fn parse_git_log_rename_aware(out: &[u8]) -> AnyResult<Vec<RenameAwareCommit>> {
     let mut commits = Vec::new();
-    for raw_record in out.split(|byte| *byte == 0x1e) {
-        let raw_record = raw_record
-            .iter()
-            .position(|byte| !matches!(*byte, 0 | b'\n' | b'\r'))
-            .map_or(&[][..], |start| &raw_record[start..]);
-        if raw_record.is_empty() {
-            continue;
-        }
-        let header_end = raw_record
-            .iter()
-            .position(|byte| *byte == b'\n')
-            .unwrap_or(raw_record.len());
-        let header = std::str::from_utf8(&raw_record[..header_end])?;
-        let mut fields = header.splitn(4, '\x1f');
+    for record in git_log_records(out) {
+        let record = record?;
+        let mut fields = record.header.splitn(4, '\x1f');
         let hash = fields.next().ok_or("missing commit hash")?.to_string();
         let unix_time: i64 = fields
             .next()
@@ -198,9 +179,8 @@ pub(super) fn parse_git_log_rename_aware(out: &[u8]) -> AnyResult<Vec<RenameAwar
         let date = normalize_git_iso8601_date(fields.next().ok_or("missing commit date")?);
         let subject = fields.next().unwrap_or_default().to_string();
 
-        let tokens: Vec<&[u8]> = raw_record
-            .get(header_end + 1..)
-            .unwrap_or_default()
+        let tokens: Vec<&[u8]> = record
+            .file_bytes
             .split(|byte| *byte == 0)
             .filter(|token| !token.is_empty())
             .collect();
@@ -278,10 +258,8 @@ pub(super) fn parse_git_log_direct(
     let mut target_weight = 0.0;
     let mut pairs: HashMap<String, DirectPairStat> =
         HashMap::with_capacity_and_hasher(direct_pair_capacity(top), Default::default());
-    for raw_record in out.split(|byte| *byte == 0x1e) {
-        let Some(record) = parse_git_log_record(raw_record)? else {
-            continue;
-        };
+    for record in git_log_records(out) {
+        let record = record?;
         let (hash, unix_time_raw, date, subject) = if config.evidence_limit == 0 {
             let (unix_time_raw, date) = record
                 .header
@@ -300,8 +278,9 @@ pub(super) fn parse_git_log_direct(
             .parse()
             .map_err(|err| format!("invalid commit unix time: {err}"))?;
         let date = normalize_git_iso8601_date(date);
-        let file_count = record.files.len();
-        let has_target = record.files.iter().any(|file| file == target);
+        let files = parse_git_log_files(record.file_bytes)?;
+        let file_count = files.len();
+        let has_target = files.iter().any(|file| file == target);
         if file_count == 0 || file_count > max_files || !has_target {
             continue;
         }
@@ -312,7 +291,7 @@ pub(super) fn parse_git_log_direct(
 
         let pair_weight = decay / ((file_count + 1) as f64).log2();
         let mut evidence = None;
-        for other in record.files.iter().filter(|file| file.as_str() != target) {
+        for other in files.iter().filter(|file| file.as_str() != target) {
             let pair = pairs.entry(other.clone()).or_default();
             pair.cochanges += 1;
             pair.weight += pair_weight;
@@ -391,7 +370,7 @@ pub(super) fn canonicalize_followed_target_paths(
 pub(crate) fn fuzz_parse_bytes(data: &[u8]) {
     let _ = parse_git_log(data);
     let _ = parse_git_log_rename_aware(data);
-    let _ = parse_git_log_record(data);
+    let _ = parse_git_follow_history(data);
 }
 
 #[cfg(test)]
@@ -400,9 +379,56 @@ mod tests {
 
     #[test]
     fn nul_git_log_parser_preserves_newlines_in_paths() {
-        let raw = b"hash\x1f1\x1f2026-01-01T00:00:00Z\x1fsubject\n\0line\nbreak.md\0other.md\0";
-        let record = parse_git_log_record(raw).unwrap().unwrap();
-        assert_eq!(record.files, vec!["line\nbreak.md", "other.md"]);
+        let raw =
+            b"\0hash\x1f1\x1f2026-01-01T00:00:00Z\x1fsubject\0\n\nline\nbreak.md\0\rother.md\0";
+        let commits = parse_git_log(raw).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].files, vec!["\nline\nbreak.md", "\rother.md"]);
+    }
+
+    #[test]
+    fn git_log_framing_preserves_control_characters_and_empty_commits() {
+        let raw = concat!(
+            "\0new\x1f3\x1f2026-01-03T00:00:00Z\x1fsubject\x1e\x1f\r\ntext\0",
+            "\ncompanion\x1efile.txt\0\x1eheader\x1f1\x1fdate\npath\0\0",
+            "\0empty\x1f2\x1f2026-01-02T00:00:00Z\x1f\0\0",
+            "\0old\x1f1\x1f2026-01-01T00:00:00Z\0\n\nleading.md\0",
+        );
+        let commits = parse_git_log(raw.as_bytes()).unwrap();
+        assert_eq!(commits.len(), 3);
+        assert_eq!(commits[0].subject, "subject\x1e\x1f\r\ntext");
+        assert_eq!(
+            commits[0].files,
+            vec!["companion\x1efile.txt", "\x1eheader\x1f1\x1fdate\npath"]
+        );
+        assert_eq!(commits[1].hash, "empty");
+        assert!(commits[1].subject.is_empty());
+        assert!(commits[1].files.is_empty());
+        assert!(commits[2].subject.is_empty());
+        assert_eq!(commits[2].files, vec!["\nleading.md"]);
+        assert!(parse_git_log(b"\0").unwrap().is_empty());
+        assert!(parse_git_log(b"\0hash\x1f1").is_err());
+    }
+
+    #[test]
+    fn nul_name_status_framing_preserves_rename_paths() {
+        let files = "\nR100\0\nold\x1e.md\0\rnew\x1f.md\0M\0other\n.md\0";
+        let raw = format!("\0abc\x1f1\x1f2026-01-01T00:00:00Z\x1frename\x1e\x1f\0{files}");
+        let commits = parse_git_log_rename_aware(raw.as_bytes()).unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].commit.subject, "rename\x1e\x1f");
+        assert_eq!(commits[0].commit.files, vec!["\rnew\x1f.md", "other\n.md"]);
+        assert_eq!(commits[0].renames[0].old_path, "\nold\x1e.md");
+        assert_eq!(commits[0].renames[0].new_path, "\rnew\x1f.md");
+
+        let raw = format!("\0abc\0{files}\0\0def\0\nA\0other\n.md\0");
+        let history = parse_git_follow_history(raw.as_bytes()).unwrap();
+        assert_eq!(history.hashes, vec!["abc", "def"]);
+        assert_eq!(history.hash_input, b"abc\ndef\n");
+        assert_eq!(history.target_paths_by_hash["abc"].len(), 3);
+        assert!(history.target_paths_by_hash["abc"].contains("\nold\x1e.md"));
+        assert!(history.target_paths_by_hash["abc"].contains("\rnew\x1f.md"));
+        assert!(history.target_paths_by_hash["def"].contains("other\n.md"));
     }
 
     #[test]
