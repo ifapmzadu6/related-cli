@@ -1,9 +1,154 @@
 use super::support::{git, new_test_repo, temp_dir, write_commit};
 use crate::commands::run_with_writer;
 use crate::history::git_log_direct_for_target;
+#[cfg(unix)]
+use crate::history::{git_log, git_log_rename_aware};
 use crate::model::{OnDemandBackend, OnDemandConfig};
 use std::fs;
 use std::process::Command;
+
+#[cfg(unix)]
+#[test]
+fn git_history_preserves_control_characters_in_paths_and_subjects() {
+    let repo = new_test_repo();
+    let old = "\nold\x1e\x1f\r.md";
+    let new = "\nnew\x1e\x1f\r.md";
+    let companions = ["companion\x1efile.txt", "\ncompanion\x1f\r\n.md"];
+    let subject = "pair\x1e record\x1f field\r carriage\t tab";
+    for version in ["one", "two"] {
+        write_commit(
+            &repo,
+            subject,
+            &[
+                (old, &format!("target {version}\n")),
+                (companions[0], &format!("first companion {version}\n")),
+                (companions[1], &format!("second companion {version}\n")),
+            ],
+        );
+    }
+    let commits = git_log(repo.to_str().unwrap(), 20, None).unwrap();
+    assert_eq!(commits.len(), 2);
+    for commit in &commits {
+        assert_eq!(commit.subject, subject);
+        assert_eq!(commit.files.len(), 3);
+        assert!(commit.files.iter().any(|path| path == old));
+        for path in companions {
+            assert!(commit.files.iter().any(|file| file == path));
+        }
+    }
+
+    let json = |args: &[&str]| {
+        let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        args.extend([
+            "--repo".to_string(),
+            repo.display().to_string(),
+            "--format".to_string(),
+            "json".to_string(),
+        ]);
+        let mut output = Vec::new();
+        run_with_writer(args, &mut output).unwrap();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let check_pairs = |items: &serde_json::Value, count: usize, evidence: usize| {
+        let items = items.as_array().unwrap();
+        assert_eq!(items.len(), companions.len());
+        for path in companions {
+            let item = items.iter().find(|item| item["path"] == path).unwrap();
+            assert_eq!(item["cochanges"], count);
+            assert_eq!(item["evidence"].as_array().unwrap().len(), evidence);
+            for record in item["evidence"].as_array().unwrap() {
+                assert_eq!(record["subject"], subject);
+                assert_eq!(record["file_count"], 3);
+            }
+        }
+    };
+    for backend in [
+        "git",
+        "git-remove-empty",
+        "git-batch",
+        "git-batch-parallel",
+        "git-diff-tree",
+        "git-diff-tree-parallel",
+        "git-rev-list",
+    ] {
+        for evidence in ["0", "2"] {
+            let result = json(&[
+                "query",
+                old,
+                "--history-backend",
+                backend,
+                "--evidence",
+                evidence,
+                "--jobs",
+                "1",
+            ]);
+            check_pairs(&result["related"], 2, evidence.parse().unwrap());
+        }
+    }
+
+    git(&repo, &["mv", old, new]);
+    for path in companions {
+        fs::write(repo.join(path), format!("{path} three\n")).unwrap();
+    }
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", subject]);
+    let records = git_log_rename_aware(repo.to_str().unwrap(), 20, None).unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].renames.len(), 1);
+    assert_eq!(records[0].renames[0].old_path, old);
+    assert_eq!(records[0].renames[0].new_path, new);
+    assert_eq!(records[0].commit.subject, subject);
+
+    fs::write(repo.join(new), "staged change\n").unwrap();
+    git(&repo, &["add", "--", new]);
+    for mode in ["direct", "pagerank"] {
+        for evidence in ["0", "3"] {
+            let result = json(&[
+                "query",
+                new,
+                "--accuracy",
+                "exact",
+                "--mode",
+                mode,
+                "--evidence",
+                evidence,
+            ]);
+            check_pairs(&result["related"], 3, evidence.parse().unwrap());
+            let audit = json(&[
+                "audit",
+                "--staged",
+                "--accuracy",
+                "exact",
+                "--mode",
+                mode,
+                "--evidence",
+                evidence,
+            ]);
+            check_pairs(&audit["candidates"], 3, evidence.parse().unwrap());
+            assert_eq!(audit["seeds"], serde_json::json!([new]));
+            assert_eq!(audit["history_coverage"]["rename_tracking"], "git-follow");
+        }
+    }
+    for task in ["query", "audit"] {
+        let report = json(&[
+            "eval",
+            "--task",
+            task,
+            "--test-commits",
+            "1",
+            "--train-commits",
+            "2",
+            "--modes",
+            "direct",
+        ]);
+        assert_eq!(report["train_commits"], 2);
+        assert_eq!(report["test_commits"], 1);
+        if task == "audit" {
+            assert_eq!(report["test_diff_renames"], 1);
+        }
+    }
+    fs::remove_dir_all(repo).ok();
+}
 
 #[test]
 fn git_backend_and_diff_support_unicode_paths() {

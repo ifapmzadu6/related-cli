@@ -12,6 +12,13 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::path::Path;
 
+// Valid commit messages and paths cannot contain NUL. Frame each header so
+// empty tokens in the -z path list can delimit commits without collisions.
+const COMMIT_FORMAT: &str = "--pretty=format:%x00%H%x1f%ct%x1f%cI%x1f%s%x00";
+const COMMIT_FORMAT_WITHOUT_SUBJECT: &str = "--pretty=format:%x00%H%x1f%ct%x1f%cI%x00";
+const FOLLOW_FORMAT: &str = "--pretty=format:%x00%H%x00";
+const DIRECT_COMPACT_FORMAT: &str = "--pretty=format:%x00%ct%x1f%cI%x00";
+
 pub(crate) fn git_log(
     repo: &str,
     max_commits: usize,
@@ -22,7 +29,7 @@ pub(crate) fn git_log(
         "--name-only".to_string(),
         "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s".to_string(),
+        COMMIT_FORMAT.to_string(),
     ];
     if max_commits > 0 {
         args.push(format!("--max-count={max_commits}"));
@@ -47,7 +54,7 @@ pub(crate) fn git_log_rename_aware(
         "--name-status".to_string(),
         "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s".to_string(),
+        COMMIT_FORMAT.to_string(),
     ];
     if max_commits > 0 {
         args.push(format!("--max-count={max_commits}"));
@@ -180,7 +187,7 @@ fn git_follow_target_history(
         "--name-status".to_string(),
         "-z".to_string(),
         "--diff-filter=ACMRT".to_string(),
-        "--pretty=format:%x1e%H".to_string(),
+        FOLLOW_FORMAT.to_string(),
     ];
     if remove_empty {
         args.push("--remove-empty".to_string());
@@ -228,9 +235,9 @@ fn git_show_hashes(
 ) -> AnyResult<HashMap<String, Commit>> {
     const HASH_CHUNK_SIZE: usize = 512;
     let pretty = if include_subject {
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s"
+        COMMIT_FORMAT
     } else {
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI"
+        COMMIT_FORMAT_WITHOUT_SUBJECT
     };
     let args = [
         "show",
@@ -441,7 +448,7 @@ fn git_show_selected_commits(repo: &str, seeds: &[GixCommitSeed]) -> AnyResult<V
         "--name-only",
         "-z",
         "--diff-filter=ACMRT",
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s",
+        COMMIT_FORMAT,
     ];
     let out = run_git_with_stdin(Path::new(repo), &args, input.as_bytes())?;
     parse_git_log(&out)
@@ -468,7 +475,7 @@ pub(crate) fn git_diff_tree_selected_commits(
         "--name-only",
         "-z",
         "--diff-filter=ACMRT",
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s",
+        COMMIT_FORMAT,
     ];
     let out = run_git_with_stdin(Path::new(repo), &args, input.as_bytes())?;
     parse_git_log(&out)
@@ -486,9 +493,9 @@ pub(crate) fn git_diff_tree_direct_from_hash_input(
     }
 
     let pretty = if config.evidence_limit == 0 {
-        "--pretty=format:%x1e%ct%x1f%cI"
+        DIRECT_COMPACT_FORMAT
     } else {
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s"
+        COMMIT_FORMAT
     };
     let args = [
         "diff-tree",
@@ -590,7 +597,7 @@ pub(super) fn git_show_commit_for_target(
         "--name-only",
         "-z",
         "--diff-filter=ACMRT",
-        "--pretty=format:%x1e%H%x1f%ct%x1f%cI%x1f%s",
+        COMMIT_FORMAT,
         commit_id.as_str(),
         "--",
         target.as_str(),
